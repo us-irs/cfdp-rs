@@ -1,0 +1,64 @@
+[package]
+name = "cfdp-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75.0"
+authors = ["Robin Mueller <muellerr@irs.uni-stuttgart.de>"]
+description = "High level CCSDS File Delivery Protocol components"
+homepage = "https://egit.irs.uni-stuttgart.de/rust/cfdp"
+repository = "https://egit.irs.uni-stuttgart.de/rust/cfdp"
+license = "Apache-2.0"
+keywords = ["no-std", "space", "packets", "ccsds", "ecss"]
+categories = ["aerospace", "aerospace::space-protocols", "no-std", "filesystem"]
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "cfdp"
+
+[dependencies]
+crc = "3"
+smallvec = "1"
+derive-new = "0.6"
+
+[dependencies.thiserror]
+version = "1"
+optional = true
+
+[dependencies.hashbrown]
+version = "0.14"
+optional = true
+
+[dependencies.serde]
+version = "1"
+optional = true
+
+[dependencies.spacepackets]
+version = "0.12"
+default-features = false
+git = "https://egit.irs.uni-stuttgart.de/rust/spacepackets"
+branch = "main"
+
+[features]
+default = ["std"]
+std = [
+    "alloc",
+    "thiserror",
+    "spacepackets/std"
+]
+alloc = [
+    "hashbrown",
+    "spacepackets/alloc"
+]
+serde = ["dep:serde", "spacepackets/serde"]
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"
+log = "0.4"
+fern = "0.6"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--generate-link-to-definition"]
