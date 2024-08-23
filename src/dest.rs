@@ -1444,4 +1444,29 @@ mod tests {
     fn test_file_transfer_with_closure_check_limit_reached() {
         // TODO: Implement test.
     }
+
+    #[test]
+    fn test_finished_pdu_insertion_rejected() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new(fault_handler, false);
+        let mut user = tb.test_user_from_cached_paths(0);
+        let finished_pdu = FinishedPduCreator::new_default(
+            PduHeader::new_no_file_data(CommonPduConfig::default(), 0),
+            DeliveryCode::Complete,
+            FileStatus::Retained,
+        );
+        let finished_pdu_raw = finished_pdu.to_vec().unwrap();
+        let packet_info = PacketInfo::new(&finished_pdu_raw).unwrap();
+        let error = tb.handler.state_machine(&mut user, Some(&packet_info));
+        assert!(error.is_err());
+        let error = error.unwrap_err();
+        if let DestError::CantProcessPacketType {
+            pdu_type,
+            directive_type,
+        } = error
+        {
+            assert_eq!(pdu_type, PduType::FileDirective);
+            assert_eq!(directive_type, Some(FileDirectiveType::FinishedPdu));
+        }
+    }
 }

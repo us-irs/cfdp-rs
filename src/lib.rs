@@ -244,25 +244,28 @@ impl RemoteEntityConfigProvider for StdRemoteEntityConfigProvider {
 pub struct VecRemoteEntityConfigProvider(pub alloc::vec::Vec<RemoteEntityConfig>);
 
 #[cfg(feature = "alloc")]
-impl RemoteEntityConfigProvider for alloc::vec::Vec<RemoteEntityConfig> {
+impl RemoteEntityConfigProvider for VecRemoteEntityConfigProvider {
     fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
-        self.iter().find(|&cfg| cfg.entity_id.value() == remote_id)
+        self.0
+            .iter()
+            .find(|&cfg| cfg.entity_id.value() == remote_id)
     }
 
     fn get_mut(&mut self, remote_id: u64) -> Option<&mut RemoteEntityConfig> {
-        self.iter_mut()
+        self.0
+            .iter_mut()
             .find(|cfg| cfg.entity_id.value() == remote_id)
     }
 
     fn add_config(&mut self, cfg: &RemoteEntityConfig) -> bool {
-        self.push(*cfg);
+        self.0.push(*cfg);
         true
     }
 
     fn remove_config(&mut self, remote_id: u64) -> bool {
-        for (idx, cfg) in self.iter().enumerate() {
+        for (idx, cfg) in self.0.iter().enumerate() {
             if cfg.entity_id.value() == remote_id {
-                self.remove(idx);
+                self.0.remove(idx);
                 return true;
             }
         }
@@ -1160,6 +1163,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_transaction_id() {
+        let transaction_id = TransactionId::new(
+            UnsignedByteFieldU16::new(1).into(),
+            UnsignedByteFieldU16::new(2).into(),
+        );
+        assert_eq!(transaction_id.source_id().value(), 1);
+        assert_eq!(transaction_id.seq_num().value(), 2);
+    }
+
+    #[test]
     fn test_metadata_pdu_info() {
         let mut buf: [u8; 128] = [0; 128];
         let pdu_header = generic_pdu_header();
@@ -1246,7 +1259,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_remote_cfg_provider_single() {
-        let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
+        let mut remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
             REMOTE_ID.into(),
             1024,
             true,
@@ -1255,7 +1268,63 @@ pub(crate) mod tests {
             ChecksumType::Crc32,
         );
         let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
-        ssert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
+        assert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
+        assert_eq!(remote_entity_retrieved.max_packet_len, 1024);
+        assert!(remote_entity_retrieved.closure_requested_by_default);
+        assert!(!remote_entity_retrieved.crc_on_transmission_by_default);
+        assert_eq!(
+            remote_entity_retrieved.default_crc_type,
+            ChecksumType::Crc32
+        );
+        let remote_entity_mut = remote_entity_cfg.get_mut(REMOTE_ID.value()).unwrap();
+        assert_eq!(remote_entity_mut.entity_id, REMOTE_ID.into());
+        let dummy = RemoteEntityConfig::new_with_default_values(
+            LOCAL_ID.into(),
+            1024,
+            true,
+            false,
+            TransmissionMode::Unacknowledged,
+            ChecksumType::Crc32,
+        );
+        assert!(!remote_entity_cfg.add_config(&dummy));
+        // Removal is no-op.
+        assert!(!remote_entity_cfg.remove_config(REMOTE_ID.value()));
+        let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
+        assert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
+    }
+
+    #[test]
+    fn test_remote_cfg_provider_vector() {
+        let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
+            REMOTE_ID.into(),
+            1024,
+            true,
+            false,
+            TransmissionMode::Unacknowledged,
+            ChecksumType::Crc32,
+        );
+        let mut remote_cfg_provider = VecRemoteEntityConfigProvider::default();
+        assert!(remote_cfg_provider.0.is_empty());
+        remote_cfg_provider.add_config(&remote_entity_cfg);
+        assert_eq!(remote_cfg_provider.0.len(), 1);
+        let remote_entity_cfg_2 = RemoteEntityConfig::new_with_default_values(
+            LOCAL_ID.into(),
+            1024,
+            true,
+            false,
+            TransmissionMode::Unacknowledged,
+            ChecksumType::Crc32,
+        );
+        let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value()).unwrap();
+        assert_eq!(cfg_0.entity_id, REMOTE_ID.into());
+        remote_cfg_provider.add_config(&remote_entity_cfg_2);
+        assert_eq!(remote_cfg_provider.0.len(), 2);
+        let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value()).unwrap();
+        assert_eq!(cfg_1.entity_id, LOCAL_ID.into());
+        assert!(remote_cfg_provider.remove_config(REMOTE_ID.value()));
+        assert_eq!(remote_cfg_provider.0.len(), 1);
+        let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value()).unwrap();
+        cfg_1_mut.default_crc_type = ChecksumType::Crc32C;
     }
 
     #[test]
@@ -1269,5 +1338,17 @@ pub(crate) mod tests {
         user_hook_dummy.notice_of_suspension_cb(transaction_id, ConditionCode::NoError, 0);
         user_hook_dummy.abandoned_cb(transaction_id, ConditionCode::NoError, 0);
         user_hook_dummy.ignore_cb(transaction_id, ConditionCode::NoError, 0);
+    }
+
+    #[test]
+    fn dummy_pdu_provider_test() {
+        let dummy_pdu_provider = DummyPduProvider(());
+        assert_eq!(dummy_pdu_provider.pdu_type(), PduType::FileData);
+        assert!(dummy_pdu_provider.file_directive_type().is_none());
+        assert_eq!(dummy_pdu_provider.pdu(), &[]);
+        assert_eq!(
+            dummy_pdu_provider.packet_target(),
+            Ok(PacketTarget::SourceEntity)
+        );
     }
 }

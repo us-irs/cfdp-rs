@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn test_put_request_path_checks() {
+    fn test_put_request_path_checks_source_too_long() {
         let mut invalid_path = String::from("/tmp/");
         invalid_path += "a".repeat(u8::MAX as usize).as_str();
         let dest_file = "/tmp/hello2.txt";
@@ -596,12 +596,46 @@ mod tests {
     }
 
     #[test]
-    fn test_put_request_path_checks_dest_file() {
+    fn test_put_request_path_checks_dest_file_too_long() {
         let mut invalid_path = String::from("/tmp/");
         invalid_path += "a".repeat(u8::MAX as usize).as_str();
         let source_file = "/tmp/hello2.txt";
         let error =
             PutRequest::new_regular_request(DEST_ID.into(), source_file, &invalid_path, None, None);
+        assert!(error.is_err());
+        let error = error.unwrap_err();
+        assert_eq!(u8::MAX as usize + 5, error.0);
+    }
+
+    #[test]
+    fn test_owned_put_request_path_checks_source_too_long() {
+        let mut invalid_path = String::from("/tmp/");
+        invalid_path += "a".repeat(u8::MAX as usize).as_str();
+        let dest_file = "/tmp/hello2.txt";
+        let error = PutRequestOwned::new_regular_request(
+            DEST_ID.into(),
+            &invalid_path,
+            dest_file,
+            None,
+            None,
+        );
+        assert!(error.is_err());
+        let error = error.unwrap_err();
+        assert_eq!(u8::MAX as usize + 5, error.0);
+    }
+
+    #[test]
+    fn test_owned_put_request_path_checks_dest_file_too_long() {
+        let mut invalid_path = String::from("/tmp/");
+        invalid_path += "a".repeat(u8::MAX as usize).as_str();
+        let source_file = "/tmp/hello2.txt";
+        let error = PutRequestOwned::new_regular_request(
+            DEST_ID.into(),
+            source_file,
+            &invalid_path,
+            None,
+            None,
+        );
         assert!(error.is_err());
         let error = error.unwrap_err();
         assert_eq!(u8::MAX as usize + 5, error.0);
@@ -701,6 +735,7 @@ mod tests {
             .expect("creating msgs to user only put request failed");
         let msg_to_user_iter = put_request.msgs_to_user();
         assert!(msg_to_user_iter.is_some());
+        assert!(put_request.check_tlv_type_validities());
         let msg_to_user_iter = msg_to_user_iter.unwrap();
         for msg_to_user_tlv in msg_to_user_iter {
             assert_eq!(msg_to_user_tlv.value(), msg_to_user.value());
@@ -715,11 +750,28 @@ mod tests {
         let put_request = PutRequest::new_msgs_to_user_only(DEST_ID.into(), binding)
             .expect("creating msgs to user only put request failed");
         let msg_to_user_iter = put_request.msgs_to_user();
+        assert!(put_request.check_tlv_type_validities());
         assert!(msg_to_user_iter.is_some());
         let msg_to_user_iter = msg_to_user_iter.unwrap();
         for msg_to_user_tlv in msg_to_user_iter {
             assert_eq!(msg_to_user_tlv.value(), msg_to_user.value());
             assert_eq!(msg_to_user_tlv.tlv_type().unwrap(), TlvType::MsgToUser);
         }
+    }
+
+    #[test]
+    fn test_put_request_to_owned() {
+        let src_file = "/tmp/hello.txt";
+        let dest_file = "/tmp/hello2.txt";
+        let put_request =
+            PutRequest::new_regular_request(DEST_ID.into(), src_file, dest_file, None, None)
+                .unwrap();
+        let put_request_owned: PutRequestOwned = put_request.into();
+        assert_eq!(put_request_owned.destination_id(), DEST_ID.into());
+        assert_eq!(put_request_owned.source_file().unwrap(), src_file);
+        assert_eq!(put_request_owned.dest_file().unwrap(), dest_file);
+        assert!(put_request_owned.msgs_to_user().is_none());
+        assert!(put_request_owned.trans_mode().is_none());
+        assert!(put_request_owned.closure_requested().is_none());
     }
 }
