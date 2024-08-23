@@ -552,8 +552,6 @@ impl<
             || self.tparams.tstate.metadata_only
         {
             file_delivery_complete = true;
-            self.tparams.tstate.delivery_code = DeliveryCode::Complete;
-            self.tparams.tstate.condition_code = ConditionCode::NoError;
         } else {
             match self.vfs.checksum_verify(
                 self.tparams.file_properties.dest_path_buf.to_str().unwrap(),
@@ -577,6 +575,10 @@ impl<
                     }
                 },
             };
+        }
+        if file_delivery_complete {
+            self.tparams.tstate.delivery_code = DeliveryCode::Complete;
+            self.tparams.tstate.condition_code = ConditionCode::NoError;
         }
         file_delivery_complete
     }
@@ -849,9 +851,9 @@ impl<
 #[cfg(test)]
 mod tests {
     use core::{cell::Cell, sync::atomic::AtomicBool};
-    use std::fs;
     #[allow(unused_imports)]
     use std::println;
+    use std::{fs, string::String};
 
     use alloc::{sync::Arc, vec::Vec};
     use rand::Rng;
@@ -938,7 +940,7 @@ mod tests {
         TestCheckTimer,
     >;
 
-    struct DestHandlerTester {
+    struct DestHandlerTestbench {
         check_timer_expired: Arc<AtomicBool>,
         handler: TestDestHandler,
         src_path: PathBuf,
@@ -952,7 +954,7 @@ mod tests {
         buf: [u8; 512],
     }
 
-    impl DestHandlerTester {
+    impl DestHandlerTestbench {
         fn new(fault_handler: TestFaultHandler, closure_requested: bool) -> Self {
             let check_timer_expired = Arc::new(AtomicBool::new(false));
             let test_sender = TestCfdpSender::default();
@@ -967,7 +969,7 @@ mod tests {
                 closure_requested,
                 dest_path,
                 check_dest_file: false,
-                check_handler_idle_at_drop: false,
+                check_handler_idle_at_drop: true,
                 expected_file_size: 0,
                 pdu_header: create_pdu_header(UbfU16::new(0)),
                 expected_full_data: Vec::new(),
@@ -1018,6 +1020,8 @@ mod tests {
             file_size: u64,
         ) -> Result<TransactionId, DestError> {
             self.expected_file_size = file_size;
+            assert_eq!(user.transaction_indication_call_count, 0);
+            assert_eq!(user.metadata_recv_queue.len(), 0);
             let metadata_pdu = create_metadata_pdu(
                 &self.pdu_header,
                 self.src_path.as_path(),
@@ -1032,6 +1036,21 @@ mod tests {
                 self.handler.transmission_mode().unwrap(),
                 TransmissionMode::Unacknowledged
             );
+            assert_eq!(user.transaction_indication_call_count, 0);
+            assert_eq!(user.metadata_recv_queue.len(), 1);
+            let metadata_recvd = user.metadata_recv_queue.pop_front().unwrap();
+            assert_eq!(metadata_recvd.source_id, LOCAL_ID.into());
+            assert_eq!(
+                metadata_recvd.src_file_name,
+                String::from(self.src_path.to_str().unwrap())
+            );
+            assert_eq!(
+                metadata_recvd.dest_file_name,
+                String::from(self.dest_path().to_str().unwrap())
+            );
+            assert_eq!(metadata_recvd.id, self.handler.transaction_id().unwrap());
+            assert_eq!(metadata_recvd.file_size, file_size);
+            assert!(metadata_recvd.msgs_to_user.is_empty());
             Ok(self.handler.transaction_id().unwrap())
         }
 
@@ -1065,6 +1084,7 @@ mod tests {
             expected_full_data: Vec<u8>,
         ) -> Result<u32, DestError> {
             self.expected_full_data = expected_full_data;
+            assert_eq!(user.finished_indic_queue.len(), 0);
             let eof_pdu = create_no_error_eof(&self.expected_full_data, &self.pdu_header);
             let packet_info = create_packet_info(&eof_pdu, &mut self.buf);
             self.check_handler_idle_at_drop = true;
@@ -1076,14 +1096,29 @@ mod tests {
             result
         }
 
+        fn check_completion_indication_success(&mut self, user: &mut TestCfdpUser) {
+            assert_eq!(user.finished_indic_queue.len(), 1);
+            let finished_indication = user.finished_indic_queue.pop_front().unwrap();
+            assert_eq!(
+                finished_indication.id,
+                self.handler.transaction_id().unwrap()
+            );
+            assert_eq!(finished_indication.file_status, FileStatus::Retained);
+            assert_eq!(finished_indication.delivery_code, DeliveryCode::Complete);
+            assert_eq!(finished_indication.condition_code, ConditionCode::NoError);
+        }
+
         fn state_check(&self, state: State, step: TransactionStep) {
             assert_eq!(self.handler.state(), state);
             assert_eq!(self.handler.step(), step);
         }
     }
 
-    impl Drop for DestHandlerTester {
+    // Specifying some checks in the drop method avoids some boilerplate.
+    impl Drop for DestHandlerTestbench {
         fn drop(&mut self) {
+            assert!(self.all_fault_queues_empty());
+            assert!(self.handler.pdu_sender.queue_empty());
             if self.check_handler_idle_at_drop {
                 self.state_check(State::Idle, TransactionStep::Idle);
             }
@@ -1197,18 +1232,14 @@ mod tests {
     #[test]
     fn test_empty_file_transfer_not_acked_no_closure() {
         let fault_handler = TestFaultHandler::default();
-        let mut testbench = DestHandlerTester::new(fault_handler, false);
-        let mut test_user = testbench.test_user_from_cached_paths(0);
-        testbench
-            .generic_transfer_init(&mut test_user, 0)
+        let mut tb = DestHandlerTestbench::new(fault_handler, false);
+        let mut test_user = tb.test_user_from_cached_paths(0);
+        tb.generic_transfer_init(&mut test_user, 0)
             .expect("transfer init failed");
-        testbench.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
-        testbench
-            .generic_eof_no_error(&mut test_user, Vec::new())
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_eof_no_error(&mut test_user, Vec::new())
             .expect("EOF no error insertion failed");
-        assert!(testbench.all_fault_queues_empty());
-        assert!(testbench.handler.pdu_sender.queue_empty());
-        testbench.state_check(State::Idle, TransactionStep::Idle);
+        tb.check_completion_indication_success(&mut test_user);
     }
 
     #[test]
@@ -1218,21 +1249,16 @@ mod tests {
         let file_size = file_data.len() as u64;
         let fault_handler = TestFaultHandler::default();
 
-        let mut testbench = DestHandlerTester::new(fault_handler, false);
-        let mut test_user = testbench.test_user_from_cached_paths(file_size);
-        testbench
-            .generic_transfer_init(&mut test_user, file_size)
+        let mut tb = DestHandlerTestbench::new(fault_handler, false);
+        let mut test_user = tb.test_user_from_cached_paths(file_size);
+        tb.generic_transfer_init(&mut test_user, file_size)
             .expect("transfer init failed");
-        testbench.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
-        testbench
-            .generic_file_data_insert(&mut test_user, 0, file_data)
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_file_data_insert(&mut test_user, 0, file_data)
             .expect("file data insertion failed");
-        testbench
-            .generic_eof_no_error(&mut test_user, file_data.to_vec())
+        tb.generic_eof_no_error(&mut test_user, file_data.to_vec())
             .expect("EOF no error insertion failed");
-        assert!(testbench.all_fault_queues_empty());
-        assert!(testbench.handler.pdu_sender.queue_empty());
-        testbench.state_check(State::Idle, TransactionStep::Idle);
+        tb.check_completion_indication_success(&mut test_user);
     }
 
     #[test]
@@ -1244,28 +1270,22 @@ mod tests {
         let segment_len = 256;
         let fault_handler = TestFaultHandler::default();
 
-        let mut testbench = DestHandlerTester::new(fault_handler, false);
-        let mut test_user = testbench.test_user_from_cached_paths(file_size);
-        testbench
-            .generic_transfer_init(&mut test_user, file_size)
+        let mut tb = DestHandlerTestbench::new(fault_handler, false);
+        let mut test_user = tb.test_user_from_cached_paths(file_size);
+        tb.generic_transfer_init(&mut test_user, file_size)
             .expect("transfer init failed");
-        testbench.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
-        testbench
-            .generic_file_data_insert(&mut test_user, 0, &random_data[0..segment_len])
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_file_data_insert(&mut test_user, 0, &random_data[0..segment_len])
             .expect("file data insertion failed");
-        testbench
-            .generic_file_data_insert(
-                &mut test_user,
-                segment_len as u64,
-                &random_data[segment_len..],
-            )
-            .expect("file data insertion failed");
-        testbench
-            .generic_eof_no_error(&mut test_user, random_data.to_vec())
+        tb.generic_file_data_insert(
+            &mut test_user,
+            segment_len as u64,
+            &random_data[segment_len..],
+        )
+        .expect("file data insertion failed");
+        tb.generic_eof_no_error(&mut test_user, random_data.to_vec())
             .expect("EOF no error insertion failed");
-        assert!(testbench.all_fault_queues_empty());
-        assert!(testbench.handler.pdu_sender.queue_empty());
-        testbench.state_check(State::Idle, TransactionStep::Idle);
+        tb.check_completion_indication_success(&mut test_user);
     }
 
     #[test]
@@ -1277,44 +1297,41 @@ mod tests {
         let segment_len = 256;
         let fault_handler = TestFaultHandler::default();
 
-        let mut testbench = DestHandlerTester::new(fault_handler, false);
-        let mut test_user = testbench.test_user_from_cached_paths(file_size);
-        let transaction_id = testbench
+        let mut tb = DestHandlerTestbench::new(fault_handler, false);
+        let mut test_user = tb.test_user_from_cached_paths(file_size);
+        let transaction_id = tb
             .generic_transfer_init(&mut test_user, file_size)
             .expect("transfer init failed");
 
-        testbench.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
-        testbench
-            .generic_file_data_insert(&mut test_user, 0, &random_data[0..segment_len])
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_file_data_insert(&mut test_user, 0, &random_data[0..segment_len])
             .expect("file data insertion 0 failed");
-        testbench
-            .generic_eof_no_error(&mut test_user, random_data.to_vec())
+        tb.generic_eof_no_error(&mut test_user, random_data.to_vec())
             .expect("EOF no error insertion failed");
-        testbench.state_check(
+        tb.state_check(
             State::Busy,
             TransactionStep::ReceivingFileDataPdusWithCheckLimitHandling,
         );
-        testbench
-            .generic_file_data_insert(
-                &mut test_user,
-                segment_len as u64,
-                &random_data[segment_len..],
-            )
-            .expect("file data insertion 1 failed");
-        testbench.set_check_timer_expired();
-        testbench
-            .handler
+        tb.generic_file_data_insert(
+            &mut test_user,
+            segment_len as u64,
+            &random_data[segment_len..],
+        )
+        .expect("file data insertion 1 failed");
+        tb.set_check_timer_expired();
+        tb.handler
             .state_machine_no_packet(&mut test_user)
             .expect("fsm failure");
-        let fault_handler = testbench.handler.local_cfg.fault_handler.user_hook.borrow();
+        let mut fault_handler = tb.handler.local_cfg.fault_handler.user_hook.borrow_mut();
 
         assert_eq!(fault_handler.ignored_queue.len(), 1);
-        let cancelled = fault_handler.ignored_queue.front().unwrap();
+        let cancelled = fault_handler.ignored_queue.pop_front().unwrap();
         assert_eq!(cancelled.0, transaction_id);
         assert_eq!(cancelled.1, ConditionCode::FileChecksumFailure);
         assert_eq!(cancelled.2, segment_len as u64);
-        assert!(testbench.handler.pdu_sender.queue_empty());
-        testbench.state_check(State::Idle, TransactionStep::Idle);
+        drop(fault_handler);
+
+        tb.check_completion_indication_success(&mut test_user);
     }
 
     #[test]
@@ -1326,7 +1343,7 @@ mod tests {
         let segment_len = 256;
 
         let fault_handler = TestFaultHandler::default();
-        let mut testbench = DestHandlerTester::new(fault_handler, false);
+        let mut testbench = DestHandlerTestbench::new(fault_handler, false);
         let mut test_user = testbench.test_user_from_cached_paths(file_size);
         let transaction_id = testbench
             .generic_transfer_init(&mut test_user, file_size)
@@ -1359,20 +1376,18 @@ mod tests {
             .expect("fsm error");
         testbench.state_check(State::Idle, TransactionStep::Idle);
 
-        let fault_hook = testbench.handler.local_cfg.user_fault_hook().borrow();
-
+        let mut fault_hook = testbench.handler.local_cfg.user_fault_hook().borrow_mut();
         assert!(fault_hook.notice_of_suspension_queue.is_empty());
-        let ignored_queue = &fault_hook.ignored_queue;
+        let ignored_queue = &mut fault_hook.ignored_queue;
         assert_eq!(ignored_queue.len(), 1);
-        let cancelled = ignored_queue.front().unwrap();
+        let cancelled = ignored_queue.pop_front().unwrap();
         assert_eq!(cancelled.0, transaction_id);
         assert_eq!(cancelled.1, ConditionCode::FileChecksumFailure);
         assert_eq!(cancelled.2, segment_len as u64);
 
-        let fault_hook = testbench.handler.local_cfg.user_fault_hook().borrow();
-        let cancelled_queue = &fault_hook.notice_of_cancellation_queue;
+        let cancelled_queue = &mut fault_hook.notice_of_cancellation_queue;
         assert_eq!(cancelled_queue.len(), 1);
-        let cancelled = *cancelled_queue.front().unwrap();
+        let cancelled = cancelled_queue.pop_front().unwrap();
         assert_eq!(cancelled.0, transaction_id);
         assert_eq!(cancelled.1, ConditionCode::CheckLimitReached);
         assert_eq!(cancelled.2, segment_len as u64);
@@ -1407,22 +1422,22 @@ mod tests {
     #[test]
     fn test_file_transfer_with_closure() {
         let fault_handler = TestFaultHandler::default();
-        let mut testbench = DestHandlerTester::new(fault_handler, true);
-        let mut test_user = testbench.test_user_from_cached_paths(0);
-        testbench
-            .generic_transfer_init(&mut test_user, 0)
+        let mut tb = DestHandlerTestbench::new(fault_handler, true);
+        let mut test_user = tb.test_user_from_cached_paths(0);
+        tb.generic_transfer_init(&mut test_user, 0)
             .expect("transfer init failed");
-        testbench.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
-        let sent_packets = testbench
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        let sent_packets = tb
             .generic_eof_no_error(&mut test_user, Vec::new())
             .expect("EOF no error insertion failed");
         assert_eq!(sent_packets, 1);
-        assert!(testbench.all_fault_queues_empty());
+        assert!(tb.all_fault_queues_empty());
         // The Finished PDU was sent, so the state machine is done.
-        testbench.state_check(State::Idle, TransactionStep::Idle);
-        assert!(!testbench.handler.pdu_sender.queue_empty());
-        let sent_pdu = testbench.handler.pdu_sender.retrieve_next_pdu().unwrap();
+        tb.state_check(State::Idle, TransactionStep::Idle);
+        assert!(!tb.handler.pdu_sender.queue_empty());
+        let sent_pdu = tb.handler.pdu_sender.retrieve_next_pdu().unwrap();
         check_finished_pdu_success(&sent_pdu);
+        tb.check_completion_indication_success(&mut test_user);
     }
 
     #[test]

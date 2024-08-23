@@ -1027,7 +1027,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Default, Debug)]
     pub(crate) struct TestFaultHandler {
         pub notice_of_suspension_queue: VecDeque<(TransactionId, ConditionCode, u64)>,
         pub notice_of_cancellation_queue: VecDeque<(TransactionId, ConditionCode, u64)>,

@@ -155,8 +155,7 @@ impl CfdpUser for ExampleCfdpUser {
     }
 }
 
-#[test]
-fn end_to_end_test() {
+fn end_to_end_test(with_closure: bool) {
     // Simplified event handling using atomic signals.
     let stop_signal_source = Arc::new(AtomicBool::new(false));
     let stop_signal_dest = stop_signal_source.clone();
@@ -189,7 +188,7 @@ fn end_to_end_test() {
     let remote_cfg_of_dest = RemoteEntityConfig::new_with_default_values(
         REMOTE_ID.into(),
         1024,
-        true,
+        with_closure,
         false,
         spacepackets::cfdp::TransmissionMode::Unacknowledged,
         ChecksumType::Crc32,
@@ -234,7 +233,7 @@ fn end_to_end_test() {
         srcfile.to_str().expect("invaid path string"),
         destfile.to_str().expect("invaid path string"),
         Some(TransmissionMode::Unacknowledged),
-        Some(true),
+        Some(with_closure),
     )
     .expect("put request creation failed");
 
@@ -339,4 +338,14 @@ fn end_to_end_test() {
 
     jh_source.join().unwrap();
     jh_dest.join().unwrap();
+}
+
+#[test]
+fn end_to_end_test_no_closure() {
+    end_to_end_test(false);
+}
+
+#[test]
+fn end_to_end_test_with_closure() {
+    end_to_end_test(true);
 }

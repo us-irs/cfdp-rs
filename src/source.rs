@@ -410,25 +410,6 @@ impl<
         if self.state_helper.step == TransactionStep::NoticeOfCompletion {
             self.notice_of_completion(cfdp_user);
             self.reset();
-            /*
-            def _notice_of_completion(self):
-                if self.cfg.indication_cfg.transaction_finished_indication_required:
-                    assert self._params.transaction_id is not None
-                    # This happens for unacknowledged file copy operation with no closure.
-                    if self._params.finished_params is None:
-                        self._params.finished_params = FinishedParams(
-                            condition_code=ConditionCode.NO_ERROR,
-                            delivery_code=DeliveryCode.DATA_COMPLETE,
-                            file_status=FileStatus.FILE_STATUS_UNREPORTED,
-                        )
-                    indication_params = TransactionFinishedParams(
-                        transaction_id=self._params.transaction_id,
-                        finished_params=self._params.finished_params,
-                    )
-                    self.user.transaction_finished_indication(indication_params)
-                # Transaction finished
-                self.reset()
-                    */
         }
         Ok(sent_packets)
     }
@@ -598,6 +579,25 @@ impl<
     }
 
     fn notice_of_completion(&mut self, cfdp_user: &mut impl CfdpUser) {
+        /*
+        def _notice_of_completion(self):
+            if self.cfg.indication_cfg.transaction_finished_indication_required:
+                assert self._params.transaction_id is not None
+                # This happens for unacknowledged file copy operation with no closure.
+                if self._params.finished_params is None:
+                    self._params.finished_params = FinishedParams(
+                        condition_code=ConditionCode.NO_ERROR,
+                        delivery_code=DeliveryCode.DATA_COMPLETE,
+                        file_status=FileStatus.FILE_STATUS_UNREPORTED,
+                    )
+                indication_params = TransactionFinishedParams(
+                    transaction_id=self._params.transaction_id,
+                    finished_params=self._params.finished_params,
+                )
+                self.user.transaction_finished_indication(indication_params)
+            # Transaction finished
+            self.reset()
+                */
         let tstate = self.tstate.as_ref().unwrap();
         if self.local_cfg.indication_cfg.transaction_finished {
             // The first case happens for unacknowledged file copy operation with no closure.
@@ -944,6 +944,206 @@ mod tests {
             );
             assert_eq!(pdu_header.common_pdu_conf().transaction_seq_num.size(), 2);
         }
+
+        fn generic_file_transfer(
+            &mut self,
+            cfdp_user: &mut TestCfdpUser,
+            with_closure: bool,
+            file_data: Vec<u8>,
+        ) -> (PduHeader, u32) {
+            let mut digest = CRC_32.digest();
+            digest.update(&file_data);
+            let checksum = digest.finalize();
+            cfdp_user.expected_full_src_name = self.srcfile.clone();
+            cfdp_user.expected_full_dest_name = self.destfile.clone();
+            cfdp_user.expected_file_size = file_data.len() as u64;
+            let put_request = PutRequestOwned::new_regular_request(
+                REMOTE_ID.into(),
+                &self.srcfile,
+                &self.destfile,
+                Some(TransmissionMode::Unacknowledged),
+                Some(with_closure),
+            )
+            .expect("creating put request failed");
+            let (closure_requested, pdu_header) = self.common_no_acked_file_transfer(
+                cfdp_user,
+                put_request,
+                cfdp_user.expected_file_size,
+            );
+            let mut current_offset = 0;
+            let chunks = file_data.chunks(
+                calculate_max_file_seg_len_for_max_packet_len_and_pdu_header(
+                    &pdu_header,
+                    self.max_packet_len,
+                    None,
+                ),
+            );
+            let mut fd_pdus = 0;
+            for segment in chunks {
+                self.check_next_file_pdu(current_offset, segment);
+                self.handler.state_machine_no_packet(cfdp_user).unwrap();
+                fd_pdus += 1;
+                current_offset += segment.len() as u64;
+            }
+            self.common_eof_pdu_check(
+                cfdp_user,
+                closure_requested,
+                cfdp_user.expected_file_size,
+                checksum,
+            );
+            (pdu_header, fd_pdus)
+        }
+
+        // Returns a tuple. First parameter: Closure requested. Second parameter: PDU header of
+        // metadata PDU.
+        fn common_no_acked_file_transfer(
+            &mut self,
+            cfdp_user: &mut TestCfdpUser,
+            put_request: PutRequestOwned,
+            filesize: u64,
+        ) -> (bool, PduHeader) {
+            assert_eq!(cfdp_user.transaction_indication_call_count, 0);
+            assert_eq!(cfdp_user.eof_sent_call_count, 0);
+
+            self.put_request(&put_request)
+                .expect("put_request call failed");
+            assert_eq!(self.handler.state(), State::Busy);
+            assert_eq!(self.handler.step(), TransactionStep::Idle);
+            let sent_packets = self
+                .handler
+                .state_machine_no_packet(cfdp_user)
+                .expect("source handler FSM failure");
+            assert_eq!(sent_packets, 2);
+            assert!(!self.pdu_queue_empty());
+            let next_pdu = self.get_next_sent_pdu().unwrap();
+            assert!(!self.pdu_queue_empty());
+            assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
+            assert_eq!(
+                next_pdu.file_directive_type,
+                Some(FileDirectiveType::MetadataPdu)
+            );
+            let metadata_pdu =
+                MetadataPduReader::new(&next_pdu.raw_pdu).expect("invalid metadata PDU format");
+            let pdu_header = metadata_pdu.pdu_header();
+            self.common_pdu_check_for_file_transfer(metadata_pdu.pdu_header(), CrcFlag::NoCrc);
+            assert_eq!(
+                metadata_pdu
+                    .src_file_name()
+                    .value_as_str()
+                    .unwrap()
+                    .unwrap(),
+                self.srcfile
+            );
+            assert_eq!(
+                metadata_pdu
+                    .dest_file_name()
+                    .value_as_str()
+                    .unwrap()
+                    .unwrap(),
+                self.destfile
+            );
+            assert_eq!(metadata_pdu.metadata_params().file_size, filesize);
+            assert_eq!(
+                metadata_pdu.metadata_params().checksum_type,
+                ChecksumType::Crc32
+            );
+            let closure_requested = if let Some(closure_requested) = put_request.closure_requested {
+                assert_eq!(
+                    metadata_pdu.metadata_params().closure_requested,
+                    closure_requested
+                );
+                closure_requested
+            } else {
+                assert!(metadata_pdu.metadata_params().closure_requested);
+                metadata_pdu.metadata_params().closure_requested
+            };
+            assert_eq!(metadata_pdu.options(), &[]);
+            (closure_requested, *pdu_header)
+        }
+
+        fn check_next_file_pdu(&mut self, expected_offset: u64, expected_data: &[u8]) {
+            let next_pdu = self.get_next_sent_pdu().unwrap();
+            assert_eq!(next_pdu.pdu_type, PduType::FileData);
+            assert!(next_pdu.file_directive_type.is_none());
+            let fd_pdu =
+                FileDataPdu::from_bytes(&next_pdu.raw_pdu).expect("reading file data PDU failed");
+            assert_eq!(fd_pdu.offset(), expected_offset);
+            assert_eq!(fd_pdu.file_data(), expected_data);
+            assert!(fd_pdu.segment_metadata().is_none());
+        }
+
+        fn common_eof_pdu_check(
+            &mut self,
+            cfdp_user: &mut TestCfdpUser,
+            closure_requested: bool,
+            filesize: u64,
+            checksum: u32,
+        ) {
+            let next_pdu = self.get_next_sent_pdu().unwrap();
+            assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
+            assert_eq!(
+                next_pdu.file_directive_type,
+                Some(FileDirectiveType::EofPdu)
+            );
+            let eof_pdu = EofPdu::from_bytes(&next_pdu.raw_pdu).expect("invalid EOF PDU format");
+            self.common_pdu_check_for_file_transfer(eof_pdu.pdu_header(), CrcFlag::NoCrc);
+            assert_eq!(eof_pdu.condition_code(), ConditionCode::NoError);
+            assert_eq!(eof_pdu.file_size(), filesize);
+            assert_eq!(eof_pdu.file_checksum(), checksum);
+            assert_eq!(
+                eof_pdu
+                    .pdu_header()
+                    .common_pdu_conf()
+                    .transaction_seq_num
+                    .value_const(),
+                0
+            );
+            if !closure_requested {
+                assert_eq!(self.handler.state(), State::Idle);
+                assert_eq!(self.handler.step(), TransactionStep::Idle);
+            } else {
+                assert_eq!(self.handler.state(), State::Busy);
+                assert_eq!(self.handler.step(), TransactionStep::WaitingForFinished);
+            }
+            assert_eq!(cfdp_user.transaction_indication_call_count, 1);
+            assert_eq!(cfdp_user.eof_sent_call_count, 1);
+            self.all_fault_queues_empty();
+        }
+
+        fn common_tiny_file_transfer(
+            &mut self,
+            cfdp_user: &mut TestCfdpUser,
+            with_closure: bool,
+        ) -> PduHeader {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .open(&self.srcfile)
+                .expect("opening file failed");
+            let content_str = "Hello World!";
+            file.write_all(content_str.as_bytes())
+                .expect("writing file content failed");
+            drop(file);
+            let (pdu_header, fd_pdus) = self.generic_file_transfer(
+                cfdp_user,
+                with_closure,
+                content_str.as_bytes().to_vec(),
+            );
+            assert_eq!(fd_pdus, 1);
+            pdu_header
+        }
+
+        fn finish_handling(&mut self, user: &mut TestCfdpUser, pdu_header: PduHeader) {
+            let finished_pdu = FinishedPduCreator::new_default(
+                pdu_header,
+                DeliveryCode::Complete,
+                FileStatus::Retained,
+            );
+            let finished_pdu_vec = finished_pdu.to_vec().unwrap();
+            let packet_info = PacketInfo::new(&finished_pdu_vec).unwrap();
+            self.handler
+                .state_machine(user, Some(&packet_info))
+                .unwrap();
+        }
     }
 
     impl Drop for SourceHandlerTestbench {
@@ -965,209 +1165,6 @@ mod tests {
         assert!(tb.pdu_queue_empty());
     }
 
-    // Returns a tuple. First parameter: Closure requested. Second parameter: PDU header of
-    // metadata PDU.
-    fn common_no_acked_file_transfer(
-        tb: &mut SourceHandlerTestbench,
-        cfdp_user: &mut TestCfdpUser,
-        put_request: PutRequestOwned,
-        filesize: u64,
-    ) -> (bool, PduHeader) {
-        assert_eq!(cfdp_user.transaction_indication_call_count, 0);
-        assert_eq!(cfdp_user.eof_sent_call_count, 0);
-
-        tb.put_request(&put_request)
-            .expect("put_request call failed");
-        assert_eq!(tb.handler.state(), State::Busy);
-        assert_eq!(tb.handler.step(), TransactionStep::Idle);
-        let sent_packets = tb
-            .handler
-            .state_machine_no_packet(cfdp_user)
-            .expect("source handler FSM failure");
-        assert_eq!(sent_packets, 2);
-        assert!(!tb.pdu_queue_empty());
-        let next_pdu = tb.get_next_sent_pdu().unwrap();
-        assert!(!tb.pdu_queue_empty());
-        assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(
-            next_pdu.file_directive_type,
-            Some(FileDirectiveType::MetadataPdu)
-        );
-        let metadata_pdu =
-            MetadataPduReader::new(&next_pdu.raw_pdu).expect("invalid metadata PDU format");
-        let pdu_header = metadata_pdu.pdu_header();
-        tb.common_pdu_check_for_file_transfer(metadata_pdu.pdu_header(), CrcFlag::NoCrc);
-        assert_eq!(
-            metadata_pdu
-                .src_file_name()
-                .value_as_str()
-                .unwrap()
-                .unwrap(),
-            tb.srcfile
-        );
-        assert_eq!(
-            metadata_pdu
-                .dest_file_name()
-                .value_as_str()
-                .unwrap()
-                .unwrap(),
-            tb.destfile
-        );
-        assert_eq!(metadata_pdu.metadata_params().file_size, filesize);
-        assert_eq!(
-            metadata_pdu.metadata_params().checksum_type,
-            ChecksumType::Crc32
-        );
-        let closure_requested = if let Some(closure_requested) = put_request.closure_requested {
-            assert_eq!(
-                metadata_pdu.metadata_params().closure_requested,
-                closure_requested
-            );
-            closure_requested
-        } else {
-            assert!(metadata_pdu.metadata_params().closure_requested);
-            metadata_pdu.metadata_params().closure_requested
-        };
-        assert_eq!(metadata_pdu.options(), &[]);
-        (closure_requested, *pdu_header)
-    }
-
-    fn common_eof_pdu_check(
-        tb: &mut SourceHandlerTestbench,
-        cfdp_user: &mut TestCfdpUser,
-        closure_requested: bool,
-        filesize: u64,
-        checksum: u32,
-    ) {
-        let next_pdu = tb.get_next_sent_pdu().unwrap();
-        assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(
-            next_pdu.file_directive_type,
-            Some(FileDirectiveType::EofPdu)
-        );
-        let eof_pdu = EofPdu::from_bytes(&next_pdu.raw_pdu).expect("invalid EOF PDU format");
-        tb.common_pdu_check_for_file_transfer(eof_pdu.pdu_header(), CrcFlag::NoCrc);
-        assert_eq!(eof_pdu.condition_code(), ConditionCode::NoError);
-        assert_eq!(eof_pdu.file_size(), filesize);
-        assert_eq!(eof_pdu.file_checksum(), checksum);
-        assert_eq!(
-            eof_pdu
-                .pdu_header()
-                .common_pdu_conf()
-                .transaction_seq_num
-                .value_const(),
-            0
-        );
-        if !closure_requested {
-            assert_eq!(tb.handler.state(), State::Idle);
-            assert_eq!(tb.handler.step(), TransactionStep::Idle);
-        } else {
-            assert_eq!(tb.handler.state(), State::Busy);
-            assert_eq!(tb.handler.step(), TransactionStep::WaitingForFinished);
-        }
-        assert_eq!(cfdp_user.transaction_indication_call_count, 1);
-        assert_eq!(cfdp_user.eof_sent_call_count, 1);
-        tb.all_fault_queues_empty();
-    }
-
-    fn check_next_file_pdu(
-        tb: &mut SourceHandlerTestbench,
-        expected_offset: u64,
-        expected_data: &[u8],
-    ) {
-        let next_pdu = tb.get_next_sent_pdu().unwrap();
-        assert_eq!(next_pdu.pdu_type, PduType::FileData);
-        assert!(next_pdu.file_directive_type.is_none());
-        let fd_pdu =
-            FileDataPdu::from_bytes(&next_pdu.raw_pdu).expect("reading file data PDU failed");
-        assert_eq!(fd_pdu.offset(), expected_offset);
-        assert_eq!(fd_pdu.file_data(), expected_data);
-        assert!(fd_pdu.segment_metadata().is_none());
-    }
-
-    fn common_file_transfer(
-        tb: &mut SourceHandlerTestbench,
-        cfdp_user: &mut TestCfdpUser,
-        with_closure: bool,
-        file_data: Vec<u8>,
-    ) -> (PduHeader, u32) {
-        let mut digest = CRC_32.digest();
-        digest.update(&file_data);
-        let checksum = digest.finalize();
-        cfdp_user.expected_full_src_name = tb.srcfile.clone();
-        cfdp_user.expected_full_dest_name = tb.destfile.clone();
-        cfdp_user.expected_file_size = file_data.len() as u64;
-        let put_request = PutRequestOwned::new_regular_request(
-            REMOTE_ID.into(),
-            &tb.srcfile,
-            &tb.destfile,
-            Some(TransmissionMode::Unacknowledged),
-            Some(with_closure),
-        )
-        .expect("creating put request failed");
-        let (closure_requested, pdu_header) =
-            common_no_acked_file_transfer(tb, cfdp_user, put_request, cfdp_user.expected_file_size);
-        let mut current_offset = 0;
-        let chunks = file_data.chunks(
-            calculate_max_file_seg_len_for_max_packet_len_and_pdu_header(
-                &pdu_header,
-                tb.max_packet_len,
-                None,
-            ),
-        );
-        let mut fd_pdus = 0;
-        for segment in chunks {
-            check_next_file_pdu(tb, current_offset, segment);
-            tb.handler.state_machine_no_packet(cfdp_user).unwrap();
-            fd_pdus += 1;
-            current_offset += segment.len() as u64;
-        }
-        common_eof_pdu_check(
-            tb,
-            cfdp_user,
-            closure_requested,
-            cfdp_user.expected_file_size,
-            checksum,
-        );
-        (pdu_header, fd_pdus)
-    }
-
-    fn common_tiny_file_transfer(
-        tb: &mut SourceHandlerTestbench,
-        cfdp_user: &mut TestCfdpUser,
-        with_closure: bool,
-    ) -> PduHeader {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&tb.srcfile)
-            .expect("opening file failed");
-        let content_str = "Hello World!";
-        file.write_all(content_str.as_bytes())
-            .expect("writing file content failed");
-        drop(file);
-        let (pdu_header, fd_pdus) =
-            common_file_transfer(tb, cfdp_user, with_closure, content_str.as_bytes().to_vec());
-        assert_eq!(fd_pdus, 1);
-        pdu_header
-    }
-
-    fn common_finish_handling(
-        tb: &mut SourceHandlerTestbench,
-        cfdp_user: &mut TestCfdpUser,
-        pdu_header: PduHeader,
-    ) {
-        let finished_pdu = FinishedPduCreator::new_default(
-            pdu_header,
-            DeliveryCode::Complete,
-            FileStatus::Retained,
-        );
-        let finished_pdu_vec = finished_pdu.to_vec().unwrap();
-        let packet_info = PacketInfo::new(&finished_pdu_vec).unwrap();
-        tb.handler
-            .state_machine(cfdp_user, Some(&packet_info))
-            .unwrap();
-    }
-
     #[test]
     fn test_empty_file_transfer_not_acked_no_closure() {
         let fault_handler = TestFaultHandler::default();
@@ -1184,9 +1181,8 @@ mod tests {
         .expect("creating put request failed");
         let mut cfdp_user = tb.create_user(0, filesize);
         let (closure_requested, _) =
-            common_no_acked_file_transfer(&mut tb, &mut cfdp_user, put_request, filesize);
-        common_eof_pdu_check(
-            &mut tb,
+            tb.common_no_acked_file_transfer(&mut cfdp_user, put_request, filesize);
+        tb.common_eof_pdu_check(
             &mut cfdp_user,
             closure_requested,
             filesize,
@@ -1200,7 +1196,7 @@ mod tests {
         let test_sender = TestCfdpSender::default();
         let mut cfdp_user = TestCfdpUser::default();
         let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
-        common_tiny_file_transfer(&mut tb, &mut cfdp_user, false);
+        tb.common_tiny_file_transfer(&mut cfdp_user, false);
     }
 
     #[test]
@@ -1209,8 +1205,8 @@ mod tests {
         let test_sender = TestCfdpSender::default();
         let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
         let mut cfdp_user = TestCfdpUser::default();
-        let pdu_header = common_tiny_file_transfer(&mut tb, &mut cfdp_user, true);
-        common_finish_handling(&mut tb, &mut cfdp_user, pdu_header)
+        let pdu_header = tb.common_tiny_file_transfer(&mut cfdp_user, true);
+        tb.finish_handling(&mut cfdp_user, pdu_header)
     }
 
     #[test]
@@ -1228,7 +1224,7 @@ mod tests {
         file.write_all(&rand_data)
             .expect("writing file content failed");
         drop(file);
-        let (_, fd_pdus) = common_file_transfer(&mut tb, &mut cfdp_user, false, rand_data.to_vec());
+        let (_, fd_pdus) = tb.generic_file_transfer(&mut cfdp_user, false, rand_data.to_vec());
         assert_eq!(fd_pdus, 2);
     }
 
@@ -1248,9 +1244,9 @@ mod tests {
             .expect("writing file content failed");
         drop(file);
         let (pdu_header, fd_pdus) =
-            common_file_transfer(&mut tb, &mut cfdp_user, false, rand_data.to_vec());
+            tb.generic_file_transfer(&mut cfdp_user, true, rand_data.to_vec());
         assert_eq!(fd_pdus, 2);
-        common_finish_handling(&mut tb, &mut cfdp_user, pdu_header)
+        tb.finish_handling(&mut cfdp_user, pdu_header)
     }
 
     #[test]
@@ -1269,15 +1265,14 @@ mod tests {
         .expect("creating put request failed");
         let mut cfdp_user = tb.create_user(0, filesize);
         let (closure_requested, pdu_header) =
-            common_no_acked_file_transfer(&mut tb, &mut cfdp_user, put_request, filesize);
-        common_eof_pdu_check(
-            &mut tb,
+            tb.common_no_acked_file_transfer(&mut cfdp_user, put_request, filesize);
+        tb.common_eof_pdu_check(
             &mut cfdp_user,
             closure_requested,
             filesize,
             CRC_32.digest().finalize(),
         );
-        common_finish_handling(&mut tb, &mut cfdp_user, pdu_header)
+        tb.finish_handling(&mut cfdp_user, pdu_header)
     }
 
     #[test]
