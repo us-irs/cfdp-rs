@@ -1,3 +1,4 @@
+//! This is an end-to-end integration tests using the CFDP abstractions provided by the library.
 use std::{
     fs::OpenOptions,
     io::Write,

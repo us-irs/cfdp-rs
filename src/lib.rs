@@ -271,12 +271,18 @@ impl RemoteEntityConfigProvider for alloc::vec::Vec<RemoteEntityConfig> {
 }
 
 impl RemoteEntityConfigProvider for RemoteEntityConfig {
-    fn get(&self, _remote_id: u64) -> Option<&RemoteEntityConfig> {
-        Some(self)
+    fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
+        if remote_id == self.entity_id.value() {
+            return Some(self);
+        }
+        None
     }
 
-    fn get_mut(&mut self, _remote_id: u64) -> Option<&mut RemoteEntityConfig> {
-        Some(self)
+    fn get_mut(&mut self, remote_id: u64) -> Option<&mut RemoteEntityConfig> {
+        if remote_id == self.entity_id.value() {
+            return Some(self);
+        }
+        None
     }
 
     fn add_config(&mut self, _cfg: &RemoteEntityConfig) -> bool {
@@ -891,6 +897,7 @@ pub(crate) mod tests {
     use super::*;
 
     pub const LOCAL_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(1);
+    pub const REMOTE_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(2);
 
     pub struct FileSegmentRecvdParamsNoSegMetadata {
         #[allow(dead_code)]
@@ -1235,6 +1242,20 @@ pub(crate) mod tests {
                 expiry_time_seconds: 1.0,
             });
         assert_eq!(check_timer.expiry_time_seconds(), 1);
+    }
+
+    #[test]
+    fn test_remote_cfg_provider_single() {
+        let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
+            REMOTE_ID.into(),
+            1024,
+            true,
+            false,
+            TransmissionMode::Unacknowledged,
+            ChecksumType::Crc32,
+        );
+        let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
+        ssert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
     }
 
     #[test]
