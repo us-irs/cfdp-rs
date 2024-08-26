@@ -850,7 +850,7 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use core::{cell::Cell, sync::atomic::AtomicBool};
+    use core::{borrow::BorrowMut, cell::Cell, sync::atomic::AtomicBool};
     #[allow(unused_imports)]
     use std::println;
     use std::{fs, string::String};
@@ -1468,5 +1468,105 @@ mod tests {
             assert_eq!(pdu_type, PduType::FileDirective);
             assert_eq!(directive_type, Some(FileDirectiveType::FinishedPdu));
         }
+    }
+
+    #[test]
+    fn test_metadata_insertion_twice_fails() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new(fault_handler, true);
+        let mut user = tb.test_user_from_cached_paths(0);
+        tb.generic_transfer_init(&mut user, 0)
+            .expect("transfer init failed");
+        tb.check_handler_idle_at_drop = false;
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        let metadata_pdu = create_metadata_pdu(
+            &tb.pdu_header,
+            tb.src_path.as_path(),
+            tb.dest_path.as_path(),
+            0,
+            tb.closure_requested,
+        );
+        let packet_info = create_packet_info(&metadata_pdu, &mut tb.buf);
+        let error = tb.handler.state_machine(&mut user, Some(&packet_info));
+        assert!(error.is_err());
+        let error = error.unwrap_err();
+        if let DestError::RecvdMetadataButIsBusy = error {
+        } else {
+            panic!("unexpected error: {:?}", error);
+        }
+    }
+
+    #[test]
+    fn test_checksum_failure_not_acked() {
+        let file_data_str = "Hello World!";
+        let file_data = file_data_str.as_bytes();
+        let file_size = file_data.len() as u64;
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new(fault_handler, true);
+        let mut user = tb.test_user_from_cached_paths(file_size);
+        tb.generic_transfer_init(&mut user, file_size)
+            .expect("transfer init failed");
+        let faulty_file_data = b"Hemlo World!";
+        assert_eq!(
+            tb.generic_file_data_insert(&mut user, 0, faulty_file_data)
+                .expect("file data insertion failed"),
+            0
+        );
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        let sent_packets = tb
+            .generic_eof_no_error(&mut user, file_data.into())
+            .expect("EOF no error insertion failed");
+        // FSM enters check limit algorithm here, so no finished PDU is created.
+        assert_eq!(sent_packets, 0);
+
+        let transaction_id = tb.handler.transaction_id().unwrap();
+        let mut fault_hook = tb.handler.local_cfg.user_fault_hook().borrow_mut();
+        assert!(fault_hook.notice_of_suspension_queue.is_empty());
+        let ignored_queue = &mut fault_hook.ignored_queue;
+        assert_eq!(ignored_queue.len(), 1);
+        let cancelled = ignored_queue.pop_front().unwrap();
+        assert_eq!(cancelled.0, transaction_id);
+        assert_eq!(cancelled.1, ConditionCode::FileChecksumFailure);
+        assert_eq!(cancelled.2, file_size);
+        drop(fault_hook);
+
+        tb.state_check(
+            State::Busy,
+            TransactionStep::ReceivingFileDataPdusWithCheckLimitHandling,
+        );
+        tb.set_check_timer_expired();
+        tb
+            .handler
+            .state_machine_no_packet(&mut user)
+            .expect("fsm error");
+        tb.state_check(
+            State::Busy,
+            TransactionStep::ReceivingFileDataPdusWithCheckLimitHandling,
+        );
+        tb.set_check_timer_expired();
+        tb
+            .handler
+            .state_machine_no_packet(&mut user)
+            .expect("fsm error");
+        tb.state_check(State::Idle, TransactionStep::Idle);
+
+        let mut fault_hook = tb.handler.local_cfg.user_fault_hook().borrow_mut();
+        let cancelled_queue = &mut fault_hook.notice_of_cancellation_queue;
+        assert_eq!(cancelled_queue.len(), 1);
+        let cancelled = cancelled_queue.pop_front().unwrap();
+        assert_eq!(cancelled.0, transaction_id);
+        assert_eq!(cancelled.1, ConditionCode::CheckLimitReached);
+        assert_eq!(cancelled.2, file_size);
+
+        drop(fault_hook);
+
+        let sent_pdu = tb.handler.pdu_sender.retrieve_next_pdu().unwrap();
+        assert_eq!(sent_pdu.pdu_type, PduType::FileDirective);
+        assert_eq!(
+            sent_pdu.file_directive_type,
+            Some(FileDirectiveType::FinishedPdu)
+        );
+        let finished_pdu = FinishedPduReader::from_bytes(&sent_pdu.raw_pdu).unwrap();
+        assert!(tb.handler.pdu_sender.queue_empty());
     }
 }
