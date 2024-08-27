@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from datetime import timedelta
 from pathlib import Path
 import ipaddress
