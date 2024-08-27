@@ -1535,8 +1535,7 @@ mod tests {
             TransactionStep::ReceivingFileDataPdusWithCheckLimitHandling,
         );
         tb.set_check_timer_expired();
-        tb
-            .handler
+        tb.handler
             .state_machine_no_packet(&mut user)
             .expect("fsm error");
         tb.state_check(
@@ -1544,8 +1543,7 @@ mod tests {
             TransactionStep::ReceivingFileDataPdusWithCheckLimitHandling,
         );
         tb.set_check_timer_expired();
-        tb
-            .handler
+        tb.handler
             .state_machine_no_packet(&mut user)
             .expect("fsm error");
         tb.state_check(State::Idle, TransactionStep::Idle);

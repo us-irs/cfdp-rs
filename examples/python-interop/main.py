@@ -55,8 +55,8 @@ from tmtccmd.config.cfdp import CfdpParams, generic_cfdp_params_to_put_request
 from tmtccmd.config.args import add_cfdp_procedure_arguments, cfdp_args_to_cfdp_params
 
 
-LOCAL_ENTITY_ID = ByteFieldU16(1)
-REMOTE_ENTITY_ID = ByteFieldU16(2)
+PYTHON_ENTITY_ID = ByteFieldU16(1)
+RUST_ENTITY_ID = ByteFieldU16(2)
 # Enable all indications for both local and remote entity.
 INDICATION_CFG = IndicationCfg()
 
@@ -79,8 +79,8 @@ DEST_ENTITY_QUEUE = Queue()
 # be sent by the UDP server.
 TM_QUEUE = Queue()
 
-REMOTE_CFG_OF_LOCAL_ENTITY = RemoteEntityCfg(
-    entity_id=LOCAL_ENTITY_ID,
+REMOTE_CFG_OF_PY_ENTITY = RemoteEntityCfg(
+    entity_id=PYTHON_ENTITY_ID,
     max_packet_len=MAX_PACKET_LEN,
     max_file_segment_len=FILE_SEGMENT_SIZE,
     closure_requested=True,
@@ -89,8 +89,8 @@ REMOTE_CFG_OF_LOCAL_ENTITY = RemoteEntityCfg(
     crc_type=ChecksumType.CRC_32,
 )
 
-REMOTE_CFG_OF_REMOTE_ENTITY = copy.copy(REMOTE_CFG_OF_LOCAL_ENTITY)
-REMOTE_CFG_OF_REMOTE_ENTITY.entity_id = REMOTE_ENTITY_ID
+REMOTE_CFG_OF_REMOTE_ENTITY = copy.copy(REMOTE_CFG_OF_PY_ENTITY)
+REMOTE_CFG_OF_REMOTE_ENTITY.entity_id = RUST_ENTITY_ID
 
 LOCAL_PORT = 5111
 REMOTE_PORT = 5222
@@ -196,10 +196,10 @@ class SourceEntityHandler(Thread):
         try:
             put_req: PutRequest = self.put_req_queue.get(False)
             _LOGGER.info(f"{self.base_str}: Handling Put Request: {put_req}")
-            if put_req.destination_id not in [LOCAL_ENTITY_ID, REMOTE_ENTITY_ID]:
+            if put_req.destination_id not in [PYTHON_ENTITY_ID, RUST_ENTITY_ID]:
                 _LOGGER.warning(
-                    f"can only handle put requests target towards {REMOTE_ENTITY_ID} or "
-                    f"{LOCAL_ENTITY_ID}"
+                    f"can only handle put requests target towards {RUST_ENTITY_ID} or "
+                    f"{PYTHON_ENTITY_ID}"
                 )
             else:
                 try:
@@ -557,7 +557,7 @@ def main():
         cfdp_params = CfdpParams()
         cfdp_args_to_cfdp_params(args, cfdp_params)
         put_req = generic_cfdp_params_to_put_request(
-            cfdp_params, LOCAL_ENTITY_ID, REMOTE_ENTITY_ID, LOCAL_ENTITY_ID
+            cfdp_params, PYTHON_ENTITY_ID, RUST_ENTITY_ID, PYTHON_ENTITY_ID
         )
         PUT_REQ_QUEUE.put(put_req)
 
@@ -572,7 +572,7 @@ def main():
     src_user = CfdpUser(BASE_STR_SRC, PUT_REQ_QUEUE)
     check_timer_provider = CustomCheckTimerProvider()
     source_handler = SourceHandler(
-        cfg=LocalEntityCfg(LOCAL_ENTITY_ID, INDICATION_CFG, src_fault_handler),
+        cfg=LocalEntityCfg(PYTHON_ENTITY_ID, INDICATION_CFG, src_fault_handler),
         seq_num_provider=src_seq_count_provider,
         remote_cfg_table=remote_cfg_table,
         user=src_user,
@@ -592,7 +592,7 @@ def main():
     dest_fault_handler = CfdpFaultHandler(BASE_STR_DEST)
     dest_user = CfdpUser(BASE_STR_DEST, PUT_REQ_QUEUE)
     dest_handler = DestHandler(
-        cfg=LocalEntityCfg(LOCAL_ENTITY_ID, INDICATION_CFG, dest_fault_handler),
+        cfg=LocalEntityCfg(PYTHON_ENTITY_ID, INDICATION_CFG, dest_fault_handler),
         user=dest_user,
         remote_cfg_table=remote_cfg_table,
         check_timer_provider=check_timer_provider,

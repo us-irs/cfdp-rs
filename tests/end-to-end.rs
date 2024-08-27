@@ -13,8 +13,8 @@ use cfdp::{
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
-    DummyPduProvider, EntityType, IndicationConfig, LocalEntityConfig, PduWithInfo,
-    RemoteEntityConfig, StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
+    EntityType, IndicationConfig, LocalEntityConfig, PduWithInfo, RemoteEntityConfig,
+    StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
 };
 use spacepackets::{
     cfdp::{ChecksumType, ConditionCode, TransmissionMode},
