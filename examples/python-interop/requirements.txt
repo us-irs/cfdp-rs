@@ -1,1 +1,2 @@
-cfdp-py == 0.2.0
+cfdp-py @ git+https://github.com/us-irs/cfdp-py.git@main
+tmtccmd == 8.0.2
