@@ -13,7 +13,7 @@ use cfdp::{
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
-    EntityType, IndicationConfig, LocalEntityConfig, PduWithInfo, RemoteEntityConfig,
+    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
     StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
 };
 use spacepackets::{
@@ -183,8 +183,8 @@ fn end_to_end_test(with_closure: bool) {
         IndicationConfig::default(),
         ExampleFaultHandler::default(),
     );
-    let (source_tx, source_rx) = mpsc::channel::<PduWithInfo>();
-    let (dest_tx, dest_rx) = mpsc::channel::<PduWithInfo>();
+    let (source_tx, source_rx) = mpsc::channel::<PduOwnedWithInfo>();
+    let (dest_tx, dest_rx) = mpsc::channel::<PduOwnedWithInfo>();
     let put_request_cacher = StaticPutRequestCacher::new(2048);
     let remote_cfg_of_dest = RemoteEntityConfig::new_with_default_values(
         REMOTE_ID.into(),

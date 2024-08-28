@@ -55,6 +55,8 @@ serde = ["dep:serde", "spacepackets/serde"]
 tempfile = "3"
 rand = "0.8"
 log = "0.4"
+fern = "0.6"
+chrono = "0.4"
 
 [package.metadata.docs.rs]
 all-features = true

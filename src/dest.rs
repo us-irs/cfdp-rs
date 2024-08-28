@@ -876,8 +876,8 @@ mod tests {
             basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler,
             LOCAL_ID,
         },
-        CheckTimerProviderCreator, CountdownProvider, FaultHandler, IndicationConfig, PacketInfo,
-        StdRemoteEntityConfigProvider, CRC_32,
+        CheckTimerProviderCreator, CountdownProvider, FaultHandler, IndicationConfig,
+        PduRawWithInfo, StdRemoteEntityConfigProvider, CRC_32,
     };
 
     use super::*;
@@ -1069,7 +1069,7 @@ mod tests {
             filedata_pdu
                 .write_to_bytes(&mut self.buf)
                 .expect("writing file data PDU failed");
-            let packet_info = PacketInfo::new(&self.buf).expect("creating packet info failed");
+            let packet_info = PduRawWithInfo::new(&self.buf).expect("creating packet info failed");
             let result = self.handler.state_machine(user, Some(&packet_info));
             if self.indication_cfg().file_segment_recv {
                 assert!(!user.file_seg_recvd_queue.is_empty());
@@ -1198,11 +1198,11 @@ mod tests {
     fn create_packet_info<'a>(
         pdu: &'a impl WritablePduPacket,
         buf: &'a mut [u8],
-    ) -> PacketInfo<'a> {
+    ) -> PduRawWithInfo<'a> {
         let written_len = pdu
             .write_to_bytes(buf)
             .expect("writing metadata PDU failed");
-        PacketInfo::new(&buf[..written_len]).expect("generating packet info failed")
+        PduRawWithInfo::new(&buf[..written_len]).expect("generating packet info failed")
     }
 
     fn create_no_error_eof(file_data: &[u8], pdu_header: &PduHeader) -> EofPdu {
@@ -1460,7 +1460,7 @@ mod tests {
             FileStatus::Retained,
         );
         let finished_pdu_raw = finished_pdu.to_vec().unwrap();
-        let packet_info = PacketInfo::new(&finished_pdu_raw).unwrap();
+        let packet_info = PduRawWithInfo::new(&finished_pdu_raw).unwrap();
         let error = tb.handler.state_machine(&mut user, Some(&packet_info));
         assert!(error.is_err());
         let error = error.unwrap_err();

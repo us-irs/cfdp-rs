@@ -92,8 +92,9 @@ REMOTE_CFG_OF_PY_ENTITY = RemoteEntityCfg(
 REMOTE_CFG_OF_REMOTE_ENTITY = copy.copy(REMOTE_CFG_OF_PY_ENTITY)
 REMOTE_CFG_OF_REMOTE_ENTITY.entity_id = RUST_ENTITY_ID
 
-LOCAL_PORT = 5111
-REMOTE_PORT = 5222
+RUST_PORT = 5111
+PY_PORT = 5222
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -622,8 +623,8 @@ def main():
     _LOGGER.info(f"Put request will be sent to remote destination {remote_addr}")
     udp_server = UdpServer(
         sleep_time=0.1,
-        addr=(str(local_addr), LOCAL_PORT),
-        explicit_remote_addr=(str(remote_addr), REMOTE_PORT),
+        addr=(str(local_addr), PY_PORT),
+        explicit_remote_addr=(str(remote_addr), RUST_PORT),
         tx_queue=TM_QUEUE,
         source_entity_rx_queue=SOURCE_ENTITY_QUEUE,
         dest_entity_rx_queue=DEST_ENTITY_QUEUE,

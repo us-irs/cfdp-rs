@@ -546,14 +546,14 @@ pub mod std_mod {
 
     use super::*;
 
-    impl PduSendProvider for mpsc::Sender<PduWithInfo> {
+    impl PduSendProvider for mpsc::Sender<PduOwnedWithInfo> {
         fn send_pdu(
             &self,
             pdu_type: PduType,
             file_directive_type: Option<FileDirectiveType>,
             raw_pdu: &[u8],
         ) -> Result<(), GenericSendError> {
-            self.send(PduWithInfo::new(
+            self.send(PduOwnedWithInfo::new(
                 pdu_type,
                 file_directive_type,
                 raw_pdu.to_vec(),
@@ -721,7 +721,7 @@ impl PduProvider for DummyPduProvider {
 /// This is a helper struct which contains base information about a particular PDU packet.
 /// This is also necessary information for CFDP packet routing. For example, some packet types
 /// like file data PDUs can only be used by CFDP source entities.
-pub struct PacketInfo<'raw_packet> {
+pub struct PduRawWithInfo<'raw_packet> {
     pdu_type: PduType,
     file_directive_type: Option<FileDirectiveType>,
     packet_len: usize,
@@ -776,7 +776,7 @@ pub fn determine_packet_target(raw_pdu: &[u8]) -> Result<PacketTarget, PduError>
     Ok(packet_target)
 }
 
-impl<'raw> PacketInfo<'raw> {
+impl<'raw> PduRawWithInfo<'raw> {
     pub fn new(raw_packet: &'raw [u8]) -> Result<Self, PduError> {
         let (pdu_header, header_len) = PduHeader::from_bytes(raw_packet)?;
         if pdu_header.pdu_type() == PduType::FileData {
@@ -813,7 +813,7 @@ impl<'raw> PacketInfo<'raw> {
     }
 }
 
-impl PduProvider for PacketInfo<'_> {
+impl PduProvider for PduRawWithInfo<'_> {
     fn pdu_type(&self) -> PduType {
         self.pdu_type
     }
@@ -838,15 +838,20 @@ pub mod alloc_mod {
         PduType,
     };
 
-    use crate::{determine_packet_target, PacketTarget, PduProvider};
+    use crate::{determine_packet_target, PacketTarget, PduProvider, PduRawWithInfo};
 
-    pub struct PduWithInfo {
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    pub struct PduOwnedWithInfo {
         pub pdu_type: PduType,
         pub file_directive_type: Option<FileDirectiveType>,
         pub pdu: alloc::vec::Vec<u8>,
     }
 
-    impl PduWithInfo {
+    impl PduOwnedWithInfo {
+        pub fn new_from_raw_packet(raw_packet: &[u8]) -> Result<Self, PduError> {
+            Ok(PduRawWithInfo::new(raw_packet)?.into())
+        }
+
         pub fn new(
             pdu_type: PduType,
             file_directive_type: Option<FileDirectiveType>,
@@ -860,7 +865,17 @@ pub mod alloc_mod {
         }
     }
 
-    impl PduProvider for PduWithInfo {
+    impl From<PduRawWithInfo<'_>> for PduOwnedWithInfo {
+        fn from(value: PduRawWithInfo) -> Self {
+            Self::new(
+                value.pdu_type(),
+                value.file_directive_type(),
+                value.raw_packet().to_vec(),
+            )
+        }
+    }
+
+    impl PduProvider for PduOwnedWithInfo {
         fn pdu_type(&self) -> PduType {
             self.pdu_type
         }
@@ -1191,7 +1206,7 @@ pub(crate) mod tests {
             .write_to_bytes(&mut buf)
             .expect("writing metadata PDU failed");
 
-        let packet_info = PacketInfo::new(&buf).expect("creating packet info failed");
+        let packet_info = PduRawWithInfo::new(&buf).expect("creating packet info failed");
         assert_eq!(packet_info.pdu_type(), PduType::FileDirective);
         assert!(packet_info.file_directive_type().is_some());
         assert_eq!(
@@ -1216,7 +1231,7 @@ pub(crate) mod tests {
         file_data_pdu
             .write_to_bytes(&mut buf)
             .expect("writing file data PDU failed");
-        let packet_info = PacketInfo::new(&buf).expect("creating packet info failed");
+        let packet_info = PduRawWithInfo::new(&buf).expect("creating packet info failed");
         assert_eq!(
             packet_info.raw_packet(),
             &buf[0..file_data_pdu.len_written()]
@@ -1237,7 +1252,7 @@ pub(crate) mod tests {
         eof_pdu
             .write_to_bytes(&mut buf)
             .expect("writing file data PDU failed");
-        let packet_info = PacketInfo::new(&buf).expect("creating packet info failed");
+        let packet_info = PduRawWithInfo::new(&buf).expect("creating packet info failed");
         assert_eq!(packet_info.pdu_type(), PduType::FileDirective);
         assert!(packet_info.file_directive_type().is_some());
         assert_eq!(packet_info.raw_packet(), &buf[0..eof_pdu.len_written()]);

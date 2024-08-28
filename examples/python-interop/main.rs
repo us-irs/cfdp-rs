@@ -2,7 +2,7 @@ use std::{
     fmt::Debug,
     fs::OpenOptions,
     io::{self, ErrorKind, Write},
-    net::{SocketAddr, ToSocketAddrs, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{atomic::AtomicBool, mpsc, Arc},
     thread,
     time::Duration,
@@ -10,23 +10,27 @@ use std::{
 
 use cfdp::{
     dest::DestinationHandler,
-    determine_packet_target,
     filestore::NativeFilestore,
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
-    EntityType, IndicationConfig, LocalEntityConfig, PduWithInfo, RemoteEntityConfig,
-    StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
+    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, PduProvider,
+    RemoteEntityConfig, StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use spacepackets::{
     cfdp::{pdu::PduError, ChecksumType, ConditionCode, TransmissionMode},
     seq_count::SeqCountProviderSyncU16,
-    util::UnsignedByteFieldU16,
+    util::{UnsignedByteFieldU16, UnsignedEnum},
 };
 
 const PYTHON_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(1);
 const RUST_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(2);
+
+const RUST_PORT: u16 = 5111;
+const PY_PORT: u16 = 5222;
+
+const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Info;
 
 const FILE_DATA: &str = "Hello World!";
 
@@ -163,15 +167,14 @@ pub struct UdpServer {
     pub socket: UdpSocket,
     recv_buf: Vec<u8>,
     sender_addr: Option<SocketAddr>,
-    src_tx: mpsc::SyncSender<Vec<u8>>,
-    dest_tx: mpsc::SyncSender<Vec<u8>>,
-    tm_rx: mpsc::Receiver<Vec<u8>>,
+    source_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
+    dest_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
+    source_tm_rx: mpsc::Receiver<PduOwnedWithInfo>,
+    dest_tm_rx: mpsc::Receiver<PduOwnedWithInfo>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum UdpServerError {
-    #[error("nothing was received")]
-    NothingReceived,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("pdu error: {0}")]
@@ -184,58 +187,69 @@ impl UdpServer {
     pub fn new<A: ToSocketAddrs>(
         addr: A,
         max_recv_size: usize,
-        src_tx: mpsc::SyncSender<Vec<u8>>,
-        dest_tx: mpsc::SyncSender<Vec<u8>>,
-        tm_rx: mpsc::Receiver<Vec<u8>>,
+        source_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
+        dest_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
+        source_tm_rx: mpsc::Receiver<PduOwnedWithInfo>,
+        dest_tm_rx: mpsc::Receiver<PduOwnedWithInfo>,
     ) -> Result<Self, io::Error> {
         let server = Self {
             socket: UdpSocket::bind(addr)?,
             recv_buf: vec![0; max_recv_size],
-            tm_rx,
-            src_tx,
-            dest_tx,
+            source_tc_tx,
+            dest_tc_tx,
             sender_addr: None,
+            source_tm_rx,
+            dest_tm_rx,
         };
         server.socket.set_nonblocking(true)?;
         Ok(server)
     }
 
-    pub fn try_recv_tc(&mut self) -> Result<(usize, SocketAddr), UdpServerError> {
+    pub fn try_recv_tc(
+        &mut self,
+    ) -> Result<Option<(PduOwnedWithInfo, SocketAddr)>, UdpServerError> {
         let res = match self.socket.recv_from(&mut self.recv_buf) {
             Ok(res) => res,
             Err(e) => {
                 return if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut {
-                    Err(UdpServerError::NothingReceived)
+                    Ok(None)
                 } else {
                     Err(e.into())
                 }
             }
         };
-        let (num_bytes, from) = res;
+        let (_, from) = res;
         self.sender_addr = Some(from);
-        let packet_target = determine_packet_target(&self.recv_buf)?;
-        match packet_target {
+        let pdu_owned = PduOwnedWithInfo::new_from_raw_packet(&self.recv_buf)?;
+        match pdu_owned.packet_target()? {
             cfdp::PacketTarget::SourceEntity => {
-                self.src_tx
-                    .send(self.recv_buf[0..num_bytes].to_vec())
+                self.source_tc_tx
+                    .send(pdu_owned.clone())
                     .map_err(|_| UdpServerError::Send)?;
             }
             cfdp::PacketTarget::DestEntity => {
-                self.dest_tx
-                    .send(self.recv_buf[0..num_bytes].to_vec())
+                self.dest_tc_tx
+                    .send(pdu_owned.clone())
                     .map_err(|_| UdpServerError::Send)?;
             }
         }
-        Ok(res)
+        Ok(Some((pdu_owned, from)))
     }
 
-    pub fn send_tm(&mut self, socket: &UdpSocket, recv_addr: &SocketAddr) {
-        while let Ok(tm) = self.tm_rx.try_recv() {
-            let result = socket.send_to(&tm, recv_addr);
-            if let Err(e) = result {
-                warn!("Sending TM with UDP socket failed: {e}")
-            }
+    pub fn recv_and_send_telemetry(&mut self) {
+        if self.last_sender().is_none() {
+            return;
         }
+        let tm_handler = |receiver: &mpsc::Receiver<PduOwnedWithInfo>| {
+            while let Ok(tm) = receiver.try_recv() {
+                let result = self.socket.send_to(tm.pdu(), self.last_sender().unwrap());
+                if let Err(e) = result {
+                    warn!("Sending TM with UDP socket failed: {e}")
+                }
+            }
+        };
+        tm_handler(&self.source_tm_rx);
+        tm_handler(&self.dest_tm_rx);
     }
 
     pub fn last_sender(&self) -> Option<SocketAddr> {
@@ -244,6 +258,20 @@ impl UdpServer {
 }
 
 fn main() {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                std::thread::current().name().expect("thread is not named"),
+                record.level(),
+                message
+            ))
+        })
+        .level(LOG_LEVEL)
+        .chain(std::io::stdout())
+        .apply()
+        .unwrap();
     // Simplified event handling using atomic signals.
     let stop_signal_source = Arc::new(AtomicBool::new(false));
     let stop_signal_dest = stop_signal_source.clone();
@@ -270,8 +298,8 @@ fn main() {
         IndicationConfig::default(),
         ExampleFaultHandler::default(),
     );
-    let (source_tx, source_rx) = mpsc::channel::<PduWithInfo>();
-    let (dest_tx, dest_rx) = mpsc::channel::<PduWithInfo>();
+    let (source_tm_tx, source_tm_rx) = mpsc::channel::<PduOwnedWithInfo>();
+    let (dest_tm_tx, dest_tm_rx) = mpsc::channel::<PduOwnedWithInfo>();
     let put_request_cacher = StaticPutRequestCacher::new(2048);
     let remote_cfg_python = RemoteEntityConfig::new_with_default_values(
         PYTHON_ID.into(),
@@ -284,7 +312,7 @@ fn main() {
     let seq_count_provider = SeqCountProviderSyncU16::default();
     let mut source_handler = SourceHandler::new(
         local_cfg_source,
-        source_tx,
+        source_tm_tx,
         NativeFilestore::default(),
         put_request_cacher,
         2048,
@@ -301,7 +329,7 @@ fn main() {
     let mut dest_handler = DestinationHandler::new(
         local_cfg_dest,
         1024,
-        dest_tx,
+        dest_tm_tx,
         NativeFilestore::default(),
         remote_cfg_python,
         StdCheckTimerCreator::default(),
@@ -317,88 +345,134 @@ fn main() {
     )
     .expect("put request creation failed");
 
+    let (source_tc_tx, source_tc_rx) = mpsc::channel();
+    let (dest_tc_tx, dest_tc_rx) = mpsc::channel();
+
+    let sock_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), RUST_PORT);
+    let mut udp_server = UdpServer::new(
+        sock_addr,
+        2048,
+        source_tc_tx,
+        dest_tc_tx,
+        source_tm_rx,
+        dest_tm_rx,
+    )
+    .expect("creating UDP server failed");
+
     let start = std::time::Instant::now();
-
-    let jh_source = thread::spawn(move || {
-        source_handler
-            .put_request(&put_request)
-            .expect("put request failed");
-        loop {
-            let mut next_delay = None;
-            let mut undelayed_call_count = 0;
-            let packet_info = match dest_rx.try_recv() {
-                Ok(pdu_with_info) => Some(pdu_with_info),
-                Err(e) => match e {
-                    mpsc::TryRecvError::Empty => None,
-                    mpsc::TryRecvError::Disconnected => {
-                        panic!("unexpected disconnect from destination channel sender");
+    let jh_source = thread::Builder::new()
+        .name("cfdp src entity".to_string())
+        .spawn(move || {
+            info!("Starting RUST SRC");
+            source_handler
+                .put_request(&put_request)
+                .expect("put request failed");
+            loop {
+                let mut next_delay = None;
+                let mut undelayed_call_count = 0;
+                let packet_info = match source_tc_rx.try_recv() {
+                    Ok(pdu_with_info) => Some(pdu_with_info),
+                    Err(e) => match e {
+                        mpsc::TryRecvError::Empty => None,
+                        mpsc::TryRecvError::Disconnected => {
+                            panic!("unexpected disconnect from destination channel sender");
+                        }
+                    },
+                };
+                match source_handler.state_machine(&mut cfdp_user_source, packet_info.as_ref()) {
+                    Ok(sent_packets) => {
+                        if sent_packets == 0 {
+                            next_delay = Some(Duration::from_millis(50));
+                        }
                     }
-                },
-            };
-            match source_handler.state_machine(&mut cfdp_user_source, packet_info.as_ref()) {
-                Ok(sent_packets) => {
-                    if sent_packets == 0 {
+                    Err(e) => {
+                        println!("Source handler error: {}", e);
                         next_delay = Some(Duration::from_millis(50));
                     }
                 }
-                Err(e) => {
-                    println!("Source handler error: {}", e);
-                    next_delay = Some(Duration::from_millis(50));
+                if let Some(delay) = next_delay {
+                    thread::sleep(delay);
+                } else {
+                    undelayed_call_count += 1;
+                }
+                if stop_signal_source.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                // Safety feature against configuration errors.
+                if undelayed_call_count >= 200 {
+                    panic!("Source handler state machine possible in permanent loop");
                 }
             }
-            if let Some(delay) = next_delay {
-                thread::sleep(delay);
-            } else {
-                undelayed_call_count += 1;
-            }
-            if stop_signal_source.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
-            // Safety feature against configuration errors.
-            if undelayed_call_count >= 200 {
-                panic!("Source handler state machine possible in permanent loop");
-            }
-        }
-    });
+        })
+        .unwrap();
 
-    let jh_dest = thread::spawn(move || {
-        loop {
-            let mut next_delay = None;
-            let mut undelayed_call_count = 0;
-            let packet_info = match source_rx.try_recv() {
-                Ok(pdu_with_info) => Some(pdu_with_info),
-                Err(e) => match e {
-                    mpsc::TryRecvError::Empty => None,
-                    mpsc::TryRecvError::Disconnected => {
-                        panic!("unexpected disconnect from destination channel sender");
+    let jh_dest = thread::Builder::new()
+        .name("cfdp dest entity".to_string())
+        .spawn(move || {
+            info!("Starting RUST DEST. Local ID {}", RUST_ID.value());
+            loop {
+                let mut next_delay = None;
+                let mut undelayed_call_count = 0;
+                let packet_info = match dest_tc_rx.try_recv() {
+                    Ok(pdu_with_info) => Some(pdu_with_info),
+                    Err(e) => match e {
+                        mpsc::TryRecvError::Empty => None,
+                        mpsc::TryRecvError::Disconnected => {
+                            panic!("unexpected disconnect from destination channel sender");
+                        }
+                    },
+                };
+                match dest_handler.state_machine(&mut cfdp_user_dest, packet_info.as_ref()) {
+                    Ok(sent_packets) => {
+                        if sent_packets == 0 {
+                            next_delay = Some(Duration::from_millis(50));
+                        }
                     }
-                },
-            };
-            match dest_handler.state_machine(&mut cfdp_user_dest, packet_info.as_ref()) {
-                Ok(sent_packets) => {
-                    if sent_packets == 0 {
+                    Err(e) => {
+                        println!("Source handler error: {}", e);
                         next_delay = Some(Duration::from_millis(50));
                     }
                 }
-                Err(e) => {
-                    println!("Source handler error: {}", e);
-                    next_delay = Some(Duration::from_millis(50));
+                if let Some(delay) = next_delay {
+                    thread::sleep(delay);
+                } else {
+                    undelayed_call_count += 1;
+                }
+                if stop_signal_dest.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                // Safety feature against configuration errors.
+                if undelayed_call_count >= 200 {
+                    panic!("Destination handler state machine possible in permanent loop");
                 }
             }
-            if let Some(delay) = next_delay {
-                thread::sleep(delay);
-            } else {
-                undelayed_call_count += 1;
+        })
+        .unwrap();
+
+    let jh_udp_server = thread::Builder::new()
+        .name("cfdp udp server".to_string())
+        .spawn(move || {
+            info!("Starting UDP server on {}", sock_addr);
+            loop {
+                loop {
+                    match udp_server.try_recv_tc() {
+                        Ok(result) => match result {
+                            Some((pdu, _addr)) => {
+                                debug!("Received PDU on UDP server: {:?}", pdu);
+                            }
+                            None => break,
+                        },
+                        Err(e) => {
+                            warn!("UDP server error: {}", e);
+                            break;
+                        }
+                    }
+                }
+                udp_server.recv_and_send_telemetry();
+                thread::sleep(Duration::from_millis(50));
             }
-            if stop_signal_dest.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
-            // Safety feature against configuration errors.
-            if undelayed_call_count >= 200 {
-                panic!("Destination handler state machine possible in permanent loop");
-            }
-        }
-    });
+        })
+        .unwrap();
 
     loop {
         if completion_signal_source_main.load(std::sync::atomic::Ordering::Relaxed)
@@ -418,4 +492,5 @@ fn main() {
 
     jh_source.join().unwrap();
     jh_dest.join().unwrap();
+    jh_udp_server.join().unwrap();
 }

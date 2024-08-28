@@ -816,7 +816,7 @@ mod tests {
         filestore::NativeFilestore,
         request::PutRequestOwned,
         tests::{basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler},
-        FaultHandler, IndicationConfig, PacketInfo, StdRemoteEntityConfigProvider, CRC_32,
+        FaultHandler, IndicationConfig, PduRawWithInfo, StdRemoteEntityConfigProvider, CRC_32,
     };
     use spacepackets::seq_count::SeqCountProviderSimple;
 
@@ -1139,7 +1139,7 @@ mod tests {
                 FileStatus::Retained,
             );
             let finished_pdu_vec = finished_pdu.to_vec().unwrap();
-            let packet_info = PacketInfo::new(&finished_pdu_vec).unwrap();
+            let packet_info = PduRawWithInfo::new(&finished_pdu_vec).unwrap();
             self.handler
                 .state_machine(user, Some(&packet_info))
                 .unwrap();
