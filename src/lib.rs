@@ -724,6 +724,7 @@ impl PduProvider for DummyPduProvider {
 pub struct PacketInfo<'raw_packet> {
     pdu_type: PduType,
     file_directive_type: Option<FileDirectiveType>,
+    packet_len: usize,
     raw_packet: &'raw_packet [u8],
 }
 
@@ -782,6 +783,7 @@ impl<'raw> PacketInfo<'raw> {
             return Ok(Self {
                 pdu_type: pdu_header.pdu_type(),
                 file_directive_type: None,
+                packet_len: pdu_header.pdu_len(),
                 raw_packet,
             });
         }
@@ -801,12 +803,13 @@ impl<'raw> PacketInfo<'raw> {
         Ok(Self {
             pdu_type: pdu_header.pdu_type(),
             file_directive_type: Some(directive),
+            packet_len: pdu_header.pdu_len(),
             raw_packet,
         })
     }
 
     pub fn raw_packet(&self) -> &[u8] {
-        self.raw_packet
+        &self.raw_packet[0..self.packet_len]
     }
 }
 
@@ -1196,6 +1199,10 @@ pub(crate) mod tests {
             FileDirectiveType::MetadataPdu
         );
         assert_eq!(
+            packet_info.raw_packet(),
+            &buf[0..metadata_pdu.len_written()]
+        );
+        assert_eq!(
             packet_info.packet_target().unwrap(),
             PacketTarget::DestEntity
         );
@@ -1210,6 +1217,10 @@ pub(crate) mod tests {
             .write_to_bytes(&mut buf)
             .expect("writing file data PDU failed");
         let packet_info = PacketInfo::new(&buf).expect("creating packet info failed");
+        assert_eq!(
+            packet_info.raw_packet(),
+            &buf[0..file_data_pdu.len_written()]
+        );
         assert_eq!(packet_info.pdu_type(), PduType::FileData);
         assert!(packet_info.file_directive_type().is_none());
         assert_eq!(
@@ -1229,6 +1240,7 @@ pub(crate) mod tests {
         let packet_info = PacketInfo::new(&buf).expect("creating packet info failed");
         assert_eq!(packet_info.pdu_type(), PduType::FileDirective);
         assert!(packet_info.file_directive_type().is_some());
+        assert_eq!(packet_info.raw_packet(), &buf[0..eof_pdu.len_written()]);
         assert_eq!(
             packet_info.file_directive_type().unwrap(),
             FileDirectiveType::EofPdu
@@ -1292,10 +1304,13 @@ pub(crate) mod tests {
         assert!(!remote_entity_cfg.remove_config(REMOTE_ID.value()));
         let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
         assert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
+        // Does not exist.
+        assert!(remote_entity_cfg.get(LOCAL_ID.value()).is_none());
+        assert!(remote_entity_cfg.get_mut(LOCAL_ID.value()).is_none());
     }
 
     #[test]
-    fn test_remote_cfg_provider_vector() {
+    fn test_remote_cfg_provider_std() {
         let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
             REMOTE_ID.into(),
             1024,
@@ -1304,7 +1319,7 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        let mut remote_cfg_provider = VecRemoteEntityConfigProvider::default();
+        let mut remote_cfg_provider = StdRemoteEntityConfigProvider::default();
         assert!(remote_cfg_provider.0.is_empty());
         remote_cfg_provider.add_config(&remote_entity_cfg);
         assert_eq!(remote_cfg_provider.0.len(), 1);
@@ -1326,6 +1341,44 @@ pub(crate) mod tests {
         assert_eq!(remote_cfg_provider.0.len(), 1);
         let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value()).unwrap();
         cfg_1_mut.default_crc_type = ChecksumType::Crc32C;
+        assert!(!remote_cfg_provider.remove_config(REMOTE_ID.value()));
+        assert!(remote_cfg_provider.get_mut(REMOTE_ID.value()).is_none());
+    }
+
+    #[test]
+    fn test_remote_cfg_provider_vector() {
+        let mut remote_cfg_provider = VecRemoteEntityConfigProvider::default();
+        let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
+            REMOTE_ID.into(),
+            1024,
+            true,
+            false,
+            TransmissionMode::Unacknowledged,
+            ChecksumType::Crc32,
+        );
+        assert!(remote_cfg_provider.0.is_empty());
+        remote_cfg_provider.add_config(&remote_entity_cfg);
+        assert_eq!(remote_cfg_provider.0.len(), 1);
+        let remote_entity_cfg_2 = RemoteEntityConfig::new_with_default_values(
+            LOCAL_ID.into(),
+            1024,
+            true,
+            false,
+            TransmissionMode::Unacknowledged,
+            ChecksumType::Crc32,
+        );
+        let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value()).unwrap();
+        assert_eq!(cfg_0.entity_id, REMOTE_ID.into());
+        remote_cfg_provider.add_config(&remote_entity_cfg_2);
+        assert_eq!(remote_cfg_provider.0.len(), 2);
+        let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value()).unwrap();
+        assert_eq!(cfg_1.entity_id, LOCAL_ID.into());
+        assert!(remote_cfg_provider.remove_config(REMOTE_ID.value()));
+        assert_eq!(remote_cfg_provider.0.len(), 1);
+        let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value()).unwrap();
+        cfg_1_mut.default_crc_type = ChecksumType::Crc32C;
+        assert!(!remote_cfg_provider.remove_config(REMOTE_ID.value()));
+        assert!(remote_cfg_provider.get_mut(REMOTE_ID.value()).is_none());
     }
 
     #[test]
@@ -1351,5 +1404,50 @@ pub(crate) mod tests {
             dummy_pdu_provider.packet_target(),
             Ok(PacketTarget::SourceEntity)
         );
+    }
+
+    #[test]
+    fn test_fault_handler_checksum_error_ignored_by_default() {
+        let fault_handler = FaultHandler::new(TestFaultHandler::default());
+        assert_eq!(
+            fault_handler.get_fault_handler(ConditionCode::FileChecksumFailure),
+            FaultHandlerCode::IgnoreError
+        );
+    }
+
+    #[test]
+    fn test_fault_handler_unsupported_checksum_ignored_by_default() {
+        let fault_handler = FaultHandler::new(TestFaultHandler::default());
+        assert_eq!(
+            fault_handler.get_fault_handler(ConditionCode::UnsupportedChecksumType),
+            FaultHandlerCode::IgnoreError
+        );
+    }
+
+    #[test]
+    fn test_fault_handler_basic() {
+        let mut fault_handler = FaultHandler::new(TestFaultHandler::default());
+        assert_eq!(
+            fault_handler.get_fault_handler(ConditionCode::FileChecksumFailure),
+            FaultHandlerCode::IgnoreError
+        );
+        fault_handler.set_fault_handler(
+            ConditionCode::FileChecksumFailure,
+            FaultHandlerCode::NoticeOfCancellation,
+        );
+        assert_eq!(
+            fault_handler.get_fault_handler(ConditionCode::FileChecksumFailure),
+            FaultHandlerCode::NoticeOfCancellation
+        );
+    }
+
+    #[test]
+    fn transaction_id_hashable_usable_as_map_key() {
+        let mut map = HashMap::new();
+        let transaction_id_0 = TransactionId::new(
+            UnsignedByteFieldU8::new(1).into(),
+            UnsignedByteFieldU8::new(2).into(),
+        );
+        map.insert(transaction_id_0, 5_u32);
     }
 }

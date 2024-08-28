@@ -561,6 +561,10 @@ impl<
             ) {
                 Ok(checksum_success) => {
                     file_delivery_complete = checksum_success;
+                    if !checksum_success {
+                        self.tparams.tstate.delivery_code = DeliveryCode::Incomplete;
+                        self.tparams.tstate.condition_code = ConditionCode::FileChecksumFailure;
+                    }
                 }
                 Err(e) => match e {
                     FilestoreError::ChecksumTypeNotImplemented(_) => {
@@ -850,7 +854,7 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use core::{borrow::BorrowMut, cell::Cell, sync::atomic::AtomicBool};
+    use core::{cell::Cell, sync::atomic::AtomicBool};
     #[allow(unused_imports)]
     use std::println;
     use std::{fs, string::String};
@@ -860,11 +864,7 @@ mod tests {
     use spacepackets::{
         cfdp::{
             lv::Lv,
-            pdu::{
-                finished::{self, FinishedPduReader},
-                metadata::MetadataPduCreator,
-                WritablePduPacket,
-            },
+            pdu::{finished::FinishedPduReader, metadata::MetadataPduCreator, WritablePduPacket},
             ChecksumType, TransmissionMode,
         },
         util::{UbfU16, UnsignedByteFieldU16},
@@ -1526,6 +1526,9 @@ mod tests {
         let transaction_id = tb.handler.transaction_id().unwrap();
         let mut fault_hook = tb.handler.local_cfg.user_fault_hook().borrow_mut();
         assert!(fault_hook.notice_of_suspension_queue.is_empty());
+
+        // The file checksum failure is ignored by default and check limit handling is now
+        // performed.
         let ignored_queue = &mut fault_hook.ignored_queue;
         assert_eq!(ignored_queue.len(), 1);
         let cancelled = ignored_queue.pop_front().unwrap();
@@ -1552,6 +1555,7 @@ mod tests {
             .expect("fsm error");
         tb.state_check(State::Idle, TransactionStep::Idle);
 
+        // Transaction is cancelled because the check limit is reached.
         let mut fault_hook = tb.handler.local_cfg.user_fault_hook().borrow_mut();
         let cancelled_queue = &mut fault_hook.notice_of_cancellation_queue;
         assert_eq!(cancelled_queue.len(), 1);
@@ -1575,6 +1579,12 @@ mod tests {
             ConditionCode::CheckLimitReached
         );
         assert_eq!(finished_pdu.delivery_code(), DeliveryCode::Incomplete);
+        assert!(finished_pdu.fault_location().is_some());
+        assert_eq!(
+            *finished_pdu.fault_location().unwrap().entity_id(),
+            REMOTE_ID.into()
+        );
+        assert_eq!(finished_pdu.fs_responses_raw(), &[]);
         assert!(tb.handler.pdu_sender.queue_empty());
         tb.expected_full_data = faulty_file_data.to_vec();
     }
