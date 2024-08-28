@@ -724,19 +724,20 @@ impl PduProvider for DummyPduProvider {
 pub struct PacketInfo<'raw_packet> {
     pdu_type: PduType,
     file_directive_type: Option<FileDirectiveType>,
-    //target: PacketTarget,
     raw_packet: &'raw_packet [u8],
 }
 
-pub fn determine_packet_target(
-    file_directive_type: Option<FileDirectiveType>,
-    raw_pdu: &[u8],
-) -> Result<PacketTarget, PduError> {
-    if file_directive_type.is_none() {
+pub fn determine_packet_target(raw_pdu: &[u8]) -> Result<PacketTarget, PduError> {
+    let (header, header_len) = PduHeader::from_bytes(raw_pdu)?;
+    if header.pdu_type() == PduType::FileData {
         return Ok(PacketTarget::DestEntity);
     }
-    let (_, header_len) = PduHeader::from_bytes(raw_pdu)?;
-    let file_directive_type = file_directive_type.unwrap();
+    let file_directive_type = FileDirectiveType::try_from(raw_pdu[header_len]).map_err(|_| {
+        PduError::InvalidDirectiveType {
+            found: raw_pdu[header_len],
+            expected: None,
+        }
+    })?;
     let packet_target =
         match file_directive_type {
             // Section c) of 4.5.3: These PDUs should always be targeted towards the file sender a.k.a.
@@ -823,7 +824,7 @@ impl PduProvider for PacketInfo<'_> {
     }
 
     fn packet_target(&self) -> Result<PacketTarget, PduError> {
-        determine_packet_target(self.file_directive_type, self.raw_packet)
+        determine_packet_target(self.raw_packet)
     }
 }
 
@@ -870,7 +871,7 @@ pub mod alloc_mod {
         }
 
         fn packet_target(&self) -> Result<PacketTarget, PduError> {
-            determine_packet_target(self.file_directive_type, &self.pdu)
+            determine_packet_target(&self.pdu)
         }
     }
 }

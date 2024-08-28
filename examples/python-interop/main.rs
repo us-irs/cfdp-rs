@@ -1,6 +1,8 @@
 use std::{
+    fmt::Debug,
     fs::OpenOptions,
-    io::Write,
+    io::{self, ErrorKind, Write},
+    net::{SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{atomic::AtomicBool, mpsc, Arc},
     thread,
     time::Duration,
@@ -8,6 +10,7 @@ use std::{
 
 use cfdp::{
     dest::DestinationHandler,
+    determine_packet_target,
     filestore::NativeFilestore,
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
@@ -15,8 +18,9 @@ use cfdp::{
     EntityType, IndicationConfig, LocalEntityConfig, PduWithInfo, RemoteEntityConfig,
     StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
 };
+use log::{info, warn};
 use spacepackets::{
-    cfdp::{ChecksumType, ConditionCode, TransmissionMode},
+    cfdp::{pdu::PduError, ChecksumType, ConditionCode, TransmissionMode},
     seq_count::SeqCountProviderSyncU16,
     util::UnsignedByteFieldU16,
 };
@@ -152,6 +156,90 @@ impl CfdpUser for ExampleCfdpUser {
             "{:?} entity: EOF received for transaction {:?}",
             self.entity_type, id
         );
+    }
+}
+
+pub struct UdpServer {
+    pub socket: UdpSocket,
+    recv_buf: Vec<u8>,
+    sender_addr: Option<SocketAddr>,
+    src_tx: mpsc::SyncSender<Vec<u8>>,
+    dest_tx: mpsc::SyncSender<Vec<u8>>,
+    tm_rx: mpsc::Receiver<Vec<u8>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UdpServerError {
+    #[error("nothing was received")]
+    NothingReceived,
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("pdu error: {0}")]
+    Pdu(#[from] PduError),
+    #[error("send error")]
+    Send,
+}
+
+impl UdpServer {
+    pub fn new<A: ToSocketAddrs>(
+        addr: A,
+        max_recv_size: usize,
+        src_tx: mpsc::SyncSender<Vec<u8>>,
+        dest_tx: mpsc::SyncSender<Vec<u8>>,
+        tm_rx: mpsc::Receiver<Vec<u8>>,
+    ) -> Result<Self, io::Error> {
+        let server = Self {
+            socket: UdpSocket::bind(addr)?,
+            recv_buf: vec![0; max_recv_size],
+            tm_rx,
+            src_tx,
+            dest_tx,
+            sender_addr: None,
+        };
+        server.socket.set_nonblocking(true)?;
+        Ok(server)
+    }
+
+    pub fn try_recv_tc(&mut self) -> Result<(usize, SocketAddr), UdpServerError> {
+        let res = match self.socket.recv_from(&mut self.recv_buf) {
+            Ok(res) => res,
+            Err(e) => {
+                return if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut {
+                    Err(UdpServerError::NothingReceived)
+                } else {
+                    Err(e.into())
+                }
+            }
+        };
+        let (num_bytes, from) = res;
+        self.sender_addr = Some(from);
+        let packet_target = determine_packet_target(&self.recv_buf)?;
+        match packet_target {
+            cfdp::PacketTarget::SourceEntity => {
+                self.src_tx
+                    .send(self.recv_buf[0..num_bytes].to_vec())
+                    .map_err(|_| UdpServerError::Send)?;
+            }
+            cfdp::PacketTarget::DestEntity => {
+                self.dest_tx
+                    .send(self.recv_buf[0..num_bytes].to_vec())
+                    .map_err(|_| UdpServerError::Send)?;
+            }
+        }
+        Ok(res)
+    }
+
+    pub fn send_tm(&mut self, socket: &UdpSocket, recv_addr: &SocketAddr) {
+        while let Ok(tm) = self.tm_rx.try_recv() {
+            let result = socket.send_to(&tm, recv_addr);
+            if let Err(e) = result {
+                warn!("Sending TM with UDP socket failed: {e}")
+            }
+        }
+    }
+
+    pub fn last_sender(&self) -> Option<SocketAddr> {
+        self.sender_addr
     }
 }
 

@@ -860,7 +860,11 @@ mod tests {
     use spacepackets::{
         cfdp::{
             lv::Lv,
-            pdu::{finished::FinishedPduReader, metadata::MetadataPduCreator, WritablePduPacket},
+            pdu::{
+                finished::{self, FinishedPduReader},
+                metadata::MetadataPduCreator,
+                WritablePduPacket,
+            },
             ChecksumType, TransmissionMode,
         },
         util::{UbfU16, UnsignedByteFieldU16},
@@ -1565,6 +1569,13 @@ mod tests {
             Some(FileDirectiveType::FinishedPdu)
         );
         let finished_pdu = FinishedPduReader::from_bytes(&sent_pdu.raw_pdu).unwrap();
+        assert_eq!(finished_pdu.file_status(), FileStatus::Retained);
+        assert_eq!(
+            finished_pdu.condition_code(),
+            ConditionCode::CheckLimitReached
+        );
+        assert_eq!(finished_pdu.delivery_code(), DeliveryCode::Incomplete);
         assert!(tb.handler.pdu_sender.queue_empty());
+        tb.expected_full_data = faulty_file_data.to_vec();
     }
 }
