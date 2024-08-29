@@ -3,7 +3,7 @@ use std::{
     fs::OpenOptions,
     io::{self, ErrorKind, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket},
-    sync::{atomic::AtomicBool, mpsc, Arc},
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -82,15 +82,11 @@ impl UserFaultHookProvider for ExampleFaultHandler {
 
 pub struct ExampleCfdpUser {
     entity_type: EntityType,
-    completion_signal: Arc<AtomicBool>,
 }
 
 impl ExampleCfdpUser {
-    pub fn new(entity_type: EntityType, completion_signal: Arc<AtomicBool>) -> Self {
-        Self {
-            entity_type,
-            completion_signal,
-        }
+    pub fn new(entity_type: EntityType) -> Self {
+        Self { entity_type }
     }
 }
 
@@ -114,8 +110,6 @@ impl CfdpUser for ExampleCfdpUser {
             "{:?} entity: Transaction finished: {:?}",
             self.entity_type, finished_params
         );
-        self.completion_signal
-            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn metadata_recvd_indication(&mut self, md_recvd_params: &MetadataReceivedParams) {
@@ -297,16 +291,6 @@ fn main() {
         .chain(std::io::stdout())
         .apply()
         .unwrap();
-    // Simplified event handling using atomic signals.
-    let stop_signal_source = Arc::new(AtomicBool::new(false));
-    let stop_signal_dest = stop_signal_source.clone();
-    // let stop_signal_ctrl = stop_signal_source.clone();
-
-    let completion_signal_source = Arc::new(AtomicBool::new(false));
-    // let completion_signal_source_main = completion_signal_source.clone();
-
-    let completion_signal_dest = Arc::new(AtomicBool::new(false));
-    // let completion_signal_dest_main = completion_signal_dest.clone();
 
     let srcfile = tempfile::NamedTempFile::new().unwrap().into_temp_path();
     let mut file = OpenOptions::new()
@@ -345,7 +329,7 @@ fn main() {
         remote_cfg_python,
         seq_count_provider,
     );
-    let mut cfdp_user_source = ExampleCfdpUser::new(EntityType::Sending, completion_signal_source);
+    let mut cfdp_user_source = ExampleCfdpUser::new(EntityType::Sending);
 
     let local_cfg_dest = LocalEntityConfig::new(
         RUST_ID.into(),
@@ -360,7 +344,7 @@ fn main() {
         remote_cfg_python,
         StdCheckTimerCreator::default(),
     );
-    let mut cfdp_user_dest = ExampleCfdpUser::new(EntityType::Receiving, completion_signal_dest);
+    let mut cfdp_user_dest = ExampleCfdpUser::new(EntityType::Receiving);
 
     let put_request = PutRequestOwned::new_regular_request(
         PYTHON_ID.into(),
@@ -422,9 +406,6 @@ fn main() {
                 } else {
                     undelayed_call_count += 1;
                 }
-                if stop_signal_source.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
                 // Safety feature against configuration errors.
                 if undelayed_call_count >= 200 {
                     panic!("Source handler state machine possible in permanent loop");
@@ -465,9 +446,6 @@ fn main() {
                 } else {
                     undelayed_call_count += 1;
                 }
-                if stop_signal_dest.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
                 // Safety feature against configuration errors.
                 if undelayed_call_count >= 200 {
                     panic!("Destination handler state machine possible in permanent loop");
@@ -501,24 +479,6 @@ fn main() {
             }
         })
         .unwrap();
-
-    //loop {
-    /*
-    if completion_signal_source_main.load(std::sync::atomic::Ordering::Relaxed)
-        && completion_signal_dest_main.load(std::sync::atomic::Ordering::Relaxed)
-    {
-        let file = std::fs::read_to_string(destfile).expect("reading file failed");
-        assert_eq!(file, FILE_DATA);
-        // Stop the threads gracefully.
-        stop_signal_ctrl.store(true, std::sync::atomic::Ordering::Relaxed);
-        break;
-    }
-    if std::time::Instant::now() - start > Duration::from_secs(20) {
-        panic!("file transfer not finished in 20 seconds");
-    }
-    */
-    //std::thread::sleep(Duration::from_millis(50));
-    //}
 
     jh_source.join().unwrap();
     jh_dest.join().unwrap();
