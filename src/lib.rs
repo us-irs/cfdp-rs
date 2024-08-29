@@ -19,7 +19,7 @@ pub mod user;
 
 use crate::time::CountdownProvider;
 use core::{cell::RefCell, fmt::Debug, hash::Hash};
-use crc::{Crc, CRC_32_CKSUM};
+use crc::{Crc, CRC_32_ISCSI, CRC_32_ISO_HDLC};
 #[cfg(feature = "std")]
 use hashbrown::HashMap;
 
@@ -682,7 +682,12 @@ pub enum State {
     Suspended = 2,
 }
 
-pub const CRC_32: Crc<u32> = Crc::<u32>::new(&CRC_32_CKSUM);
+/// SANA registry entry: https://sanaregistry.org/r/checksum_identifiers/records/4
+/// Entry in CRC catalogue: https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-32
+pub const CRC_32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+/// SANA registry entry: https://sanaregistry.org/r/checksum_identifiers/records/3
+/// Entry in CRC catalogue: https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-32-iscsi
+pub const CRC_32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

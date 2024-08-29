@@ -1,6 +1,5 @@
 use alloc::string::{String, ToString};
 use core::fmt::Display;
-use crc::{Crc, CRC_32_CKSUM};
 use spacepackets::cfdp::ChecksumType;
 use spacepackets::ByteConversionError;
 #[cfg(feature = "std")]
@@ -8,8 +7,6 @@ use std::error::Error;
 use std::path::Path;
 #[cfg(feature = "std")]
 pub use std_mod::*;
-
-pub const CRC_32: Crc<u32> = Crc::<u32>::new(&CRC_32_CKSUM);
 
 #[derive(Debug, Clone)]
 pub enum FilestoreError {
@@ -171,6 +168,10 @@ pub trait VirtualFilestore {
 #[cfg(feature = "std")]
 pub mod std_mod {
 
+    use crc::Crc;
+
+    use crate::{CRC_32, CRC_32C};
+
     use super::*;
     use std::{
         fs::{self, File, OpenOptions},
@@ -306,21 +307,23 @@ pub mod std_mod {
             checksum_type: ChecksumType,
             verification_buf: &mut [u8],
         ) -> Result<u32, FilestoreError> {
+            let mut calc_with_crc_lib = |crc: Crc<u32>| -> Result<u32, FilestoreError> {
+                let mut digest = crc.digest();
+                let file_to_check = File::open(file_path)?;
+                let mut buf_reader = BufReader::new(file_to_check);
+                loop {
+                    let bytes_read = buf_reader.read(verification_buf)?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    digest.update(&verification_buf[0..bytes_read]);
+                }
+                Ok(digest.finalize())
+            };
             match checksum_type {
                 ChecksumType::Modular => self.calc_modular_checksum(file_path),
-                ChecksumType::Crc32 => {
-                    let mut digest = CRC_32.digest();
-                    let file_to_check = File::open(file_path)?;
-                    let mut buf_reader = BufReader::new(file_to_check);
-                    loop {
-                        let bytes_read = buf_reader.read(verification_buf)?;
-                        if bytes_read == 0 {
-                            break;
-                        }
-                        digest.update(&verification_buf[0..bytes_read]);
-                    }
-                    Ok(digest.finalize())
-                }
+                ChecksumType::Crc32 => calc_with_crc_lib(CRC_32),
+                ChecksumType::Crc32C => calc_with_crc_lib(CRC_32C),
                 ChecksumType::NullChecksum => Ok(0),
                 _ => Err(FilestoreError::ChecksumTypeNotImplemented(checksum_type)),
             }

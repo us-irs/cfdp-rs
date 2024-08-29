@@ -113,7 +113,7 @@ pub enum SourceError {
     SourceFileNotValidUtf8(Utf8Error),
     #[error("destination file does not have valid UTF8 format: {0}")]
     DestFileNotValidUtf8(Utf8Error),
-    #[error("error related to PDU creation")]
+    #[error("error related to PDU creation: {0}")]
     Pdu(#[from] PduError),
     #[error("cfdp feature not implemented")]
     NotImplemented,

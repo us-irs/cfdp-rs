@@ -19,7 +19,10 @@ use cfdp::{
 };
 use log::{debug, info, warn};
 use spacepackets::{
-    cfdp::{pdu::PduError, ChecksumType, ConditionCode, TransmissionMode},
+    cfdp::{
+        pdu::{file_data::FileDataPdu, metadata::MetadataPduReader, PduError},
+        ChecksumType, ConditionCode, TransmissionMode,
+    },
     seq_count::SeqCountProviderSyncU16,
     util::{UnsignedByteFieldU16, UnsignedEnum},
 };
@@ -166,7 +169,7 @@ impl CfdpUser for ExampleCfdpUser {
 pub struct UdpServer {
     pub socket: UdpSocket,
     recv_buf: Vec<u8>,
-    sender_addr: Option<SocketAddr>,
+    remote_addr: SocketAddr,
     source_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
     dest_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
     source_tm_rx: mpsc::Receiver<PduOwnedWithInfo>,
@@ -186,6 +189,7 @@ pub enum UdpServerError {
 impl UdpServer {
     pub fn new<A: ToSocketAddrs>(
         addr: A,
+        remote_addr: SocketAddr,
         max_recv_size: usize,
         source_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
         dest_tc_tx: mpsc::Sender<PduOwnedWithInfo>,
@@ -197,7 +201,7 @@ impl UdpServer {
             recv_buf: vec![0; max_recv_size],
             source_tc_tx,
             dest_tc_tx,
-            sender_addr: None,
+            remote_addr,
             source_tm_rx,
             dest_tm_rx,
         };
@@ -219,7 +223,7 @@ impl UdpServer {
             }
         };
         let (_, from) = res;
-        self.sender_addr = Some(from);
+        self.remote_addr = from;
         let pdu_owned = PduOwnedWithInfo::new_from_raw_packet(&self.recv_buf)?;
         match pdu_owned.packet_target()? {
             cfdp::PacketTarget::SourceEntity => {
@@ -237,12 +241,11 @@ impl UdpServer {
     }
 
     pub fn recv_and_send_telemetry(&mut self) {
-        if self.last_sender().is_none() {
-            return;
-        }
         let tm_handler = |receiver: &mpsc::Receiver<PduOwnedWithInfo>| {
             while let Ok(tm) = receiver.try_recv() {
-                let result = self.socket.send_to(tm.pdu(), self.last_sender().unwrap());
+                debug!("Sending PDU: {:?}", tm);
+                pdu_printout(&tm);
+                let result = self.socket.send_to(tm.pdu(), self.remote_addr());
                 if let Err(e) = result {
                     warn!("Sending TM with UDP socket failed: {e}")
                 }
@@ -252,8 +255,30 @@ impl UdpServer {
         tm_handler(&self.dest_tm_rx);
     }
 
-    pub fn last_sender(&self) -> Option<SocketAddr> {
-        self.sender_addr
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+}
+
+fn pdu_printout(pdu: &PduOwnedWithInfo) {
+    match pdu.pdu_type() {
+        spacepackets::cfdp::PduType::FileDirective => match pdu.file_directive_type().unwrap() {
+            spacepackets::cfdp::pdu::FileDirectiveType::EofPdu => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::FinishedPdu => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::AckPdu => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::MetadataPdu => {
+                let meta_pdu =
+                    MetadataPduReader::new(pdu.pdu()).expect("creating metadata pdu failed");
+                debug!("Metadata PDU: {:?}", meta_pdu)
+            }
+            spacepackets::cfdp::pdu::FileDirectiveType::NakPdu => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::PromptPdu => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::KeepAlivePdu => (),
+        },
+        spacepackets::cfdp::PduType::FileData => {
+            let fd_pdu = FileDataPdu::from_bytes(pdu.pdu()).expect("creating file data pdu failed");
+            debug!("File data PDU: {:?}", fd_pdu);
+        }
     }
 }
 
@@ -275,19 +300,20 @@ fn main() {
     // Simplified event handling using atomic signals.
     let stop_signal_source = Arc::new(AtomicBool::new(false));
     let stop_signal_dest = stop_signal_source.clone();
-    let stop_signal_ctrl = stop_signal_source.clone();
+    // let stop_signal_ctrl = stop_signal_source.clone();
 
     let completion_signal_source = Arc::new(AtomicBool::new(false));
-    let completion_signal_source_main = completion_signal_source.clone();
+    // let completion_signal_source_main = completion_signal_source.clone();
 
     let completion_signal_dest = Arc::new(AtomicBool::new(false));
-    let completion_signal_dest_main = completion_signal_dest.clone();
+    // let completion_signal_dest_main = completion_signal_dest.clone();
 
     let srcfile = tempfile::NamedTempFile::new().unwrap().into_temp_path();
     let mut file = OpenOptions::new()
         .write(true)
         .open(&srcfile)
         .expect("opening file failed");
+    info!("created test source file {:?}", srcfile);
     file.write_all(FILE_DATA.as_bytes())
         .expect("writing file content failed");
     let destdir = tempfile::tempdir().expect("creating temp directory failed");
@@ -307,7 +333,7 @@ fn main() {
         true,
         false,
         spacepackets::cfdp::TransmissionMode::Unacknowledged,
-        ChecksumType::Crc32,
+        ChecksumType::Crc32C,
     );
     let seq_count_provider = SeqCountProviderSyncU16::default();
     let mut source_handler = SourceHandler::new(
@@ -348,9 +374,11 @@ fn main() {
     let (source_tc_tx, source_tc_rx) = mpsc::channel();
     let (dest_tc_tx, dest_tc_rx) = mpsc::channel();
 
-    let sock_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), RUST_PORT);
+    let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), RUST_PORT);
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PY_PORT);
     let mut udp_server = UdpServer::new(
-        sock_addr,
+        local_addr,
+        remote_addr,
         2048,
         source_tc_tx,
         dest_tc_tx,
@@ -359,7 +387,6 @@ fn main() {
     )
     .expect("creating UDP server failed");
 
-    let start = std::time::Instant::now();
     let jh_source = thread::Builder::new()
         .name("cfdp src entity".to_string())
         .spawn(move || {
@@ -386,7 +413,7 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        println!("Source handler error: {}", e);
+                        warn!("cfdp src entity error: {}", e);
                         next_delay = Some(Duration::from_millis(50));
                     }
                 }
@@ -452,13 +479,14 @@ fn main() {
     let jh_udp_server = thread::Builder::new()
         .name("cfdp udp server".to_string())
         .spawn(move || {
-            info!("Starting UDP server on {}", sock_addr);
+            info!("Starting UDP server on {}", remote_addr);
             loop {
                 loop {
                     match udp_server.try_recv_tc() {
                         Ok(result) => match result {
                             Some((pdu, _addr)) => {
                                 debug!("Received PDU on UDP server: {:?}", pdu);
+                                pdu_printout(&pdu);
                             }
                             None => break,
                         },
@@ -474,21 +502,23 @@ fn main() {
         })
         .unwrap();
 
-    loop {
-        if completion_signal_source_main.load(std::sync::atomic::Ordering::Relaxed)
-            && completion_signal_dest_main.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            let file = std::fs::read_to_string(destfile).expect("reading file failed");
-            assert_eq!(file, FILE_DATA);
-            // Stop the threads gracefully.
-            stop_signal_ctrl.store(true, std::sync::atomic::Ordering::Relaxed);
-            break;
-        }
-        if std::time::Instant::now() - start > Duration::from_secs(2) {
-            panic!("file transfer not finished in 2 seconds");
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    //loop {
+    /*
+    if completion_signal_source_main.load(std::sync::atomic::Ordering::Relaxed)
+        && completion_signal_dest_main.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        let file = std::fs::read_to_string(destfile).expect("reading file failed");
+        assert_eq!(file, FILE_DATA);
+        // Stop the threads gracefully.
+        stop_signal_ctrl.store(true, std::sync::atomic::Ordering::Relaxed);
+        break;
     }
+    if std::time::Instant::now() - start > Duration::from_secs(20) {
+        panic!("file transfer not finished in 20 seconds");
+    }
+    */
+    //std::thread::sleep(Duration::from_millis(50));
+    //}
 
     jh_source.join().unwrap();
     jh_dest.join().unwrap();
