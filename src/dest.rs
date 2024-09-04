@@ -1,6 +1,5 @@
 use crate::{user::TransactionFinishedParams, DummyPduProvider, GenericSendError, PduProvider};
 use core::str::{from_utf8, from_utf8_unchecked, Utf8Error};
-use std::path::Path;
 
 use super::{
     filestore::{FilestoreError, NativeFilestore, VirtualFilestore},
@@ -696,7 +695,6 @@ impl<
             &self.tparams.file_properties.dest_file_name
                 [..self.tparams.file_properties.dest_file_name_len],
         )?;
-        //let dest_path = Path::new(dest_name);
         self.tparams.file_properties.dest_path_buf[0..dest_name.len()]
             .copy_from_slice(dest_name.as_bytes());
         self.tparams.file_properties.dest_file_path_len = dest_name.len();
@@ -732,30 +730,20 @@ impl<
         cfdp_user.metadata_recvd_indication(&metadata_recvd_params);
 
         if self.vfs.exists(dest_name)? && self.vfs.is_dir(dest_name)? {
-            // TODO: We require a VFS function to retrieve the file name from a full path to
-            // avoid the last std runtime dependency.
-
             // Create new destination path by concatenating the last part of the source source
             // name and the destination folder. For example, for a source file of /tmp/hello.txt
             // and a destination name of /home/test, the resulting file name should be
             // /home/test/hello.txt
             // Safety: It was already verified that the path is valid during the transaction start.
-            let source_path = Path::new(unsafe {
-                from_utf8_unchecked(
-                    //from_utf8(
-                    &self.tparams.file_properties.src_file_name
-                        [..self.tparams.file_properties.src_file_name_len],
-                )
-            });
-            let source_name = source_path.file_name();
-            if source_name.is_none() {
+            let source_file_name = self.vfs.file_name(src_name)?;
+            if source_file_name.is_none() {
                 return Err(DestError::PathConcat);
             }
-            let source_name = source_name.unwrap();
+            let source_name = source_file_name.unwrap();
             self.tparams.file_properties.dest_path_buf[dest_name.len()] = b'/';
             self.tparams.file_properties.dest_path_buf
                 [dest_name.len() + 1..dest_name.len() + 1 + source_name.len()]
-                .copy_from_slice(source_name.as_encoded_bytes());
+                .copy_from_slice(source_name.as_bytes());
             self.tparams.file_properties.dest_file_path_len += 1 + source_name.len();
         }
         let dest_path_str = from_utf8(
@@ -909,7 +897,11 @@ mod tests {
     use core::{cell::Cell, sync::atomic::AtomicBool};
     #[allow(unused_imports)]
     use std::println;
-    use std::{fs, path::PathBuf, string::String};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        string::String,
+    };
 
     use alloc::{sync::Arc, vec::Vec};
     use rand::Rng;
