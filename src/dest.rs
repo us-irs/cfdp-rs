@@ -1,6 +1,6 @@
 use crate::{user::TransactionFinishedParams, DummyPduProvider, GenericSendError, PduProvider};
-use core::str::{from_utf8, Utf8Error};
-use std::path::{Path, PathBuf};
+use core::str::{from_utf8, from_utf8_unchecked, Utf8Error};
+use std::path::Path;
 
 use super::{
     filestore::{FilestoreError, NativeFilestore, VirtualFilestore},
@@ -33,7 +33,8 @@ struct FileProperties {
     src_file_name_len: usize,
     dest_file_name: [u8; u8::MAX as usize],
     dest_file_name_len: usize,
-    dest_path_buf: PathBuf,
+    dest_path_buf: [u8; u8::MAX as usize * 2],
+    dest_file_path_len: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -42,6 +43,7 @@ enum CompletionDisposition {
     Cancelled = 1,
 }
 
+/// This enumeration models the different transaction steps of the destination entity handler.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TransactionStep {
@@ -114,7 +116,8 @@ impl Default for FileProperties {
             src_file_name_len: Default::default(),
             dest_file_name: [0; u8::MAX as usize],
             dest_file_name_len: Default::default(),
-            dest_path_buf: Default::default(),
+            dest_path_buf: [0; u8::MAX as usize * 2],
+            dest_file_path_len: Default::default(),
         }
     }
 }
@@ -198,14 +201,19 @@ pub enum DestError {
 ///
 /// The [DestinationHandler::state_machine] function is the primary function to drive the
 /// destination handler. It can be used to insert packets into the destination
-/// handler and driving the state machine, which might generate new
-/// packets to be sent to the remote entity. Please note that the destination handler can also
-/// only process Metadata, EOF and Prompt PDUs in addition to ACK PDUs where the acknowledged
-/// PDU is the Finished PDU.
+/// handler and driving the state machine, which might generate new packets to be sent to the
+/// remote entity. Please note that the destination handler can also only process Metadata, EOF and
+/// Prompt PDUs in addition to ACK PDUs where the acknowledged PDU is the Finished PDU.
+/// All generated packets are sent using the user provided [PduSendProvider].
 ///
-/// All generated packets are sent via the [CfdpPacketSender] trait, which is implemented by the
-/// user and passed as a constructor parameter. The number of generated packets is returned
-/// by the state machine call.
+/// The handler requires the [alloc] feature but will allocated all required memory on construction
+/// time. This means that the handler is still suitable for embedded systems where run-time
+/// allocation is prohibited. Furthermore, it uses the [VirtualFilestore] abstraction to allow
+/// usage on systems without a [std] filesystem.
+///
+/// This handler does not support concurrency out of the box. Instead, if concurrent handling
+/// is required, it is recommended to create a new handler and run all active handlers inside a
+/// thread pool, or move the newly created handler to a new thread.
 pub struct DestinationHandler<
     PduSender: PduSendProvider,
     UserFaultHook: UserFaultHookProvider,
@@ -256,21 +264,21 @@ impl<
     ///
     /// # Arguments
     ///
-    /// * `local_cfg` - The local CFDP entity configuration, consisting of the local entity ID,
-    ///    the indication configuration, and the fault handlers.
+    /// * `local_cfg` - The local CFDP entity configuration.
     /// * `max_packet_len` - The maximum expected generated packet size in bytes. Each time a
     ///    packet is sent, it will be buffered inside an internal buffer. The length of this buffer
     ///    will be determined by this parameter. This parameter can either be a known upper bound,
     ///    or it can specifically be determined by the largest packet size parameter of all remote
     ///    entity configurations in the passed `remote_cfg_table`.
-    /// * `packet_sender` - All generated packets are sent via this abstraction.
-    /// * `vfs` - Virtual filestore implementation to decouple the CFDP implementation from the
-    ///    underlying filestore/filesystem. This allows to use this handler for embedded systems
-    ///    where a standard runtime might not be available.
-    /// * `remote_cfg_table` - A table of all expected remote entities this entity will communicate
-    ///    with. It contains various configuration parameters required for file transfers.
-    /// * `check_timer_creator` - This is used by the CFDP handler to generate timers required
-    ///    by various tasks.
+    /// * `pdu_sender` - [PduSendProvider] used to send generated PDU packets.
+    /// * `vfs` - [VirtualFilestore] implementation used by the handler, which decouples the CFDP
+    ///    implementation from the underlying filestore/filesystem. This allows to use this handler
+    ///    for embedded systems where a standard runtime might not be available.
+    /// * `remote_cfg_table` - The [RemoteEntityConfigProvider] used to look up remote
+    ///    entities and target specific configuration for file copy operations.
+    /// * `check_timer_creator` - [CheckTimerProviderCreator] used by the CFDP handler to generate
+    ///    timers required by various tasks. This allows to use this handler for embedded systems
+    ///    where the standard time APIs might not be available.
     pub fn new(
         local_cfg: LocalEntityConfig<UserFaultHook>,
         max_packet_len: usize,
@@ -303,7 +311,7 @@ impl<
     /// packets into the destination handler.
     ///
     /// The state machine should either be called if a packet with the appropriate destination ID
-    /// is received, or periodically in IDLE periods to perform all CFDP related tasks, for example
+    /// is received and periodically to perform all CFDP related tasks, for example
     /// checking for timeouts or missed file segments.
     ///
     /// The function returns the number of sent PDU packets on success.
@@ -470,7 +478,14 @@ impl<
             });
         }
         if let Err(e) = self.vfs.write_data(
-            self.tparams.file_properties.dest_path_buf.to_str().unwrap(),
+            // Safety: It was already verified that the path is valid during the transaction start.
+            unsafe {
+                from_utf8_unchecked(
+                    //from_utf8(
+                    &self.tparams.file_properties.dest_path_buf
+                        [0..self.tparams.file_properties.dest_file_path_len],
+                )
+            },
             fd_pdu.offset(),
             fd_pdu.file_data(),
         ) {
@@ -556,7 +571,13 @@ impl<
             file_delivery_complete = true;
         } else {
             match self.vfs.checksum_verify(
-                self.tparams.file_properties.dest_path_buf.to_str().unwrap(),
+                // Safety: It was already verified that the path is valid during the transaction start.
+                unsafe {
+                    from_utf8_unchecked(
+                        &self.tparams.file_properties.dest_path_buf
+                            [0..self.tparams.file_properties.dest_file_path_len],
+                    )
+                },
                 self.tparams.metadata_params().checksum_type,
                 checksum,
                 &mut self.tparams.cksum_buf,
@@ -675,8 +696,10 @@ impl<
             &self.tparams.file_properties.dest_file_name
                 [..self.tparams.file_properties.dest_file_name_len],
         )?;
-        let dest_path = Path::new(dest_name);
-        self.tparams.file_properties.dest_path_buf = dest_path.to_path_buf();
+        //let dest_path = Path::new(dest_name);
+        self.tparams.file_properties.dest_path_buf[0..dest_name.len()]
+            .copy_from_slice(dest_name.as_bytes());
+        self.tparams.file_properties.dest_file_path_len = dest_name.len();
         let source_id = self.tparams.pdu_conf.source_id();
         let id = TransactionId::new(source_id, self.tparams.pdu_conf.transaction_seq_num);
         let src_name = from_utf8(
@@ -708,26 +731,37 @@ impl<
         self.tparams.tstate.transaction_id = Some(id);
         cfdp_user.metadata_recvd_indication(&metadata_recvd_params);
 
-        // TODO: This is the only remaining function which uses std.. the easiest way would
-        // probably be to use a static pre-allocated dest path buffer to store any concatenated
-        // paths.
-        if dest_path.exists() && self.vfs.is_dir(dest_path.to_str().unwrap())? {
+        if self.vfs.exists(dest_name)? && self.vfs.is_dir(dest_name)? {
+            // TODO: We require a VFS function to retrieve the file name from a full path to
+            // avoid the last std runtime dependency.
+
             // Create new destination path by concatenating the last part of the source source
             // name and the destination folder. For example, for a source file of /tmp/hello.txt
             // and a destination name of /home/test, the resulting file name should be
             // /home/test/hello.txt
-            let source_path = Path::new(from_utf8(
-                &self.tparams.file_properties.src_file_name
-                    [..self.tparams.file_properties.src_file_name_len],
-            )?);
+            // Safety: It was already verified that the path is valid during the transaction start.
+            let source_path = Path::new(unsafe {
+                from_utf8_unchecked(
+                    //from_utf8(
+                    &self.tparams.file_properties.src_file_name
+                        [..self.tparams.file_properties.src_file_name_len],
+                )
+            });
             let source_name = source_path.file_name();
             if source_name.is_none() {
                 return Err(DestError::PathConcat);
             }
             let source_name = source_name.unwrap();
-            self.tparams.file_properties.dest_path_buf.push(source_name);
+            self.tparams.file_properties.dest_path_buf[dest_name.len()] = b'/';
+            self.tparams.file_properties.dest_path_buf
+                [dest_name.len() + 1..dest_name.len() + 1 + source_name.len()]
+                .copy_from_slice(source_name.as_encoded_bytes());
+            self.tparams.file_properties.dest_file_path_len += 1 + source_name.len();
         }
-        let dest_path_str = self.tparams.file_properties.dest_path_buf.to_str().unwrap();
+        let dest_path_str = from_utf8(
+            &self.tparams.file_properties.dest_path_buf
+                [0..self.tparams.file_properties.dest_file_path_len],
+        )?;
         if self.vfs.exists(dest_path_str)? {
             self.vfs.truncate_file(dest_path_str)?;
         } else {
@@ -763,8 +797,13 @@ impl<
             .disposition_on_cancellation
             && self.tstate().delivery_code == DeliveryCode::Incomplete
         {
-            self.vfs
-                .remove_file(self.tparams.file_properties.dest_path_buf.to_str().unwrap())?;
+            // Safety: We already verified that the path is valid during the transaction start.
+            self.vfs.remove_file(unsafe {
+                from_utf8_unchecked(
+                    &self.tparams.file_properties.dest_path_buf
+                        [0..self.tparams.file_properties.dest_file_path_len],
+                )
+            })?;
             self.tstate_mut().file_status = FileStatus::DiscardDeliberately;
         }
         let tstate = self.tstate();
@@ -870,7 +909,7 @@ mod tests {
     use core::{cell::Cell, sync::atomic::AtomicBool};
     #[allow(unused_imports)]
     use std::println;
-    use std::{fs, string::String};
+    use std::{fs, path::PathBuf, string::String};
 
     use alloc::{sync::Arc, vec::Vec};
     use rand::Rng;

@@ -219,6 +219,8 @@ pub trait RemoteEntityConfigProvider {
     fn remove_config(&mut self, remote_id: u64) -> bool;
 }
 
+/// This is a thin wrapper around a [HashMap] to store remote entity configurations.
+/// It implements the full [RemoteEntityConfigProvider] trait.
 #[cfg(feature = "std")]
 #[derive(Default)]
 pub struct StdRemoteEntityConfigProvider(pub HashMap<u64, RemoteEntityConfig>);
@@ -239,6 +241,8 @@ impl RemoteEntityConfigProvider for StdRemoteEntityConfigProvider {
     }
 }
 
+/// This is a thin wrapper around a [alloc::vec::Vec] to store remote entity configurations.
+/// It implements the full [RemoteEntityConfigProvider] trait.
 #[cfg(feature = "alloc")]
 #[derive(Default)]
 pub struct VecRemoteEntityConfigProvider(pub alloc::vec::Vec<RemoteEntityConfig>);
@@ -273,6 +277,9 @@ impl RemoteEntityConfigProvider for VecRemoteEntityConfigProvider {
     }
 }
 
+/// A remote entity configurations also implements the [RemoteEntityConfigProvider], but the
+/// [RemoteEntityConfigProvider::add_config] and [RemoteEntityConfigProvider::remove_config]
+/// are no-ops and always returns [false].
 impl RemoteEntityConfigProvider for RemoteEntityConfig {
     fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
         if remote_id == self.entity_id.value() {
@@ -300,7 +307,7 @@ impl RemoteEntityConfigProvider for RemoteEntityConfig {
 /// This trait introduces some callbacks which will be called when a particular CFDP fault
 /// handler is called.
 ///
-/// It is passed into the CFDP handlers as part of the [DefaultFaultHandler] and the local entity
+/// It is passed into the CFDP handlers as part of the [UserFaultHookProvider] and the local entity
 /// configuration and provides a way to specify custom user error handlers. This allows to
 /// implement some CFDP features like fault handler logging, which would not be possible
 /// generically otherwise.
@@ -327,6 +334,8 @@ pub trait UserFaultHookProvider {
     fn ignore_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64);
 }
 
+/// Dummy fault hook which implements [UserFaultHookProvider] but only provides empty
+/// implementations.
 #[derive(Default, Debug, PartialEq, Eq, Copy, Clone)]
 pub struct DummyFaultHook {}
 
@@ -364,7 +373,7 @@ impl UserFaultHookProvider for DummyFaultHook {
 /// It does so by mapping each applicable [spacepackets::cfdp::ConditionCode] to a fault handler
 /// which is denoted by the four [spacepackets::cfdp::FaultHandlerCode]s. This code is used
 /// to select the error handling inside the CFDP handler itself in addition to dispatching to a
-/// user-provided callback function provided by the [UserFaultHandler].
+/// user-provided callback function provided by the [UserFaultHookProvider].
 ///
 /// Some note on the provided default settings:
 ///
@@ -487,6 +496,7 @@ impl Default for IndicationConfig {
     }
 }
 
+/// Each CFDP entity handler has a [LocalEntityConfig]uration.
 pub struct LocalEntityConfig<UserFaultHook: UserFaultHookProvider> {
     pub id: UnsignedByteField,
     pub indication_cfg: IndicationConfig,
@@ -563,7 +573,7 @@ pub mod std_mod {
         }
     }
 
-    /// Simple implementation of the [CheckTimerCreator] trait assuming a standard runtime.
+    /// Simple implementation of the [CountdownProvider] trait assuming a standard runtime.
     /// It also assumes that a second accuracy of the check timer period is sufficient.
     #[derive(Debug)]
     pub struct StdCheckTimer {
@@ -682,11 +692,15 @@ pub enum State {
     Suspended = 2,
 }
 
-/// SANA registry entry: https://sanaregistry.org/r/checksum_identifiers/records/4
-/// Entry in CRC catalogue: https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-32
+/// [crc::Crc] instance using [crc::CRC_32_ISO_HDLC].
+///
+/// SANA registry entry: <https://sanaregistry.org/r/checksum_identifiers/records/4>,
+/// Entry in CRC catalogue: <https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-32>
 pub const CRC_32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
-/// SANA registry entry: https://sanaregistry.org/r/checksum_identifiers/records/3
-/// Entry in CRC catalogue: https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-32-iscsi
+/// [crc::Crc] instance using [crc::CRC_32_ISCSI].
+///
+/// SANA registry entry: <https://sanaregistry.org/r/checksum_identifiers/records/3>,
+/// Entry in CRC catalogue: <https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-32-iscsi>
 pub const CRC_32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
