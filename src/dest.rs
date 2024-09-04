@@ -1632,4 +1632,7 @@ mod tests {
         assert!(tb.handler.pdu_sender.queue_empty());
         tb.expected_full_data = faulty_file_data.to_vec();
     }
+
+    #[test]
+    fn test_file_copy_to_directory() {}
 }

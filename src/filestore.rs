@@ -137,6 +137,9 @@ pub trait VirtualFilestore {
 
     fn exists(&self, path: &str) -> Result<bool, FilestoreError>;
 
+    /// Extract the file name part of a full path.
+    ///
+    /// This method should behave similarly to the [std::path::Path::file_name] method.
     fn file_name<'a>(&self, full_path: &'a str) -> Result<Option<&'a str>, FilestoreError>;
 
     fn file_size(&self, path: &str) -> Result<u64, FilestoreError>;
@@ -213,11 +216,7 @@ pub mod std_mod {
         }
 
         fn file_name<'a>(&self, full_path: &'a str) -> Result<Option<&'a str>, FilestoreError> {
-            if self.is_dir(full_path)? {
-                return Err(FilestoreError::IsNotFile);
-            }
             let path = Path::new(full_path);
-
             path.file_name()
                 .map(|s| s.to_str())
                 .ok_or(FilestoreError::Utf8Error)
