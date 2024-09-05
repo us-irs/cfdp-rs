@@ -278,16 +278,16 @@ impl<
         UserFaultHook: UserFaultHookProvider,
         Vfs: VirtualFilestore,
         RemoteCfgTable: RemoteEntityConfigProvider,
-        CheckTimerCreator: TimerCreatorProvider<Countdown = CheckTimerProvider>,
-        CheckTimerProvider: CountdownProvider,
+        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+        Countdown: CountdownProvider,
     >
     DestinationHandler<
         PduSender,
         UserFaultHook,
         Vfs,
         RemoteCfgTable,
-        CheckTimerCreator,
-        CheckTimerProvider,
+        TimerCreator,
+        Countdown,
     >
 {
     /// Constructs a new destination handler.
@@ -306,7 +306,7 @@ impl<
     ///    for embedded systems where a standard runtime might not be available.
     /// * `remote_cfg_table` - The [RemoteEntityConfigProvider] used to look up remote
     ///    entities and target specific configuration for file copy operations.
-    /// * `check_timer_creator` - [CheckTimerProviderCreator] used by the CFDP handler to generate
+    /// * `check_timer_creator` - [TimerCreatorProvider] used by the CFDP handler to generate
     ///    timers required by various tasks. This allows to use this handler for embedded systems
     ///    where the standard time APIs might not be available.
     pub fn new(
@@ -315,7 +315,7 @@ impl<
         pdu_sender: PduSender,
         vfs: Vfs,
         remote_cfg_table: RemoteCfgTable,
-        check_timer_creator: CheckTimerCreator,
+        check_timer_creator: TimerCreator,
     ) -> Self {
         Self {
             local_cfg,
@@ -914,11 +914,11 @@ impl<
         &self.local_cfg
     }
 
-    fn tstate(&self) -> &TransferState<CheckTimerProvider> {
+    fn tstate(&self) -> &TransferState<Countdown> {
         &self.tparams.tstate
     }
 
-    fn tstate_mut(&mut self) -> &mut TransferState<CheckTimerProvider> {
+    fn tstate_mut(&mut self) -> &mut TransferState<Countdown> {
         &mut self.tparams.tstate
     }
 }
