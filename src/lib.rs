@@ -40,6 +40,7 @@ use hashbrown::HashMap;
 
 #[cfg(feature = "alloc")]
 pub use alloc_mod::*;
+use core::time::Duration;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use spacepackets::{
@@ -49,8 +50,6 @@ use spacepackets::{
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
-#[cfg(feature = "std")]
-use std::time::Duration;
 #[cfg(feature = "std")]
 pub use std_mod::*;
 
@@ -67,10 +66,10 @@ pub enum TimerContext {
         entity_type: EntityType,
     },
     NakActivity {
-        expiry_time_seconds: f32,
+        expiry_time: Duration,
     },
     PositiveAck {
-        expiry_time_seconds: f32,
+        expiry_time: Duration,
     },
 }
 
@@ -592,27 +591,26 @@ pub mod std_mod {
     /// It also assumes that a second accuracy of the check timer period is sufficient.
     #[derive(Debug)]
     pub struct StdCountdown {
-        expiry_time_seconds: u64,
+        expiry_time: Duration,
         start_time: std::time::Instant,
     }
 
     impl StdCountdown {
-        pub fn new(expiry_time_seconds: u64) -> Self {
+        pub fn new(expiry_time: Duration) -> Self {
             Self {
-                expiry_time_seconds,
+                expiry_time,
                 start_time: std::time::Instant::now(),
             }
         }
 
         pub fn expiry_time_seconds(&self) -> u64 {
-            self.expiry_time_seconds
+            self.expiry_time.as_secs()
         }
     }
 
     impl CountdownProvider for StdCountdown {
         fn has_expired(&self) -> bool {
-            let elapsed_time = self.start_time.elapsed();
-            if elapsed_time.as_nanos() > self.expiry_time_seconds as u128 * 1_000_000_000 {
+            if self.start_time.elapsed() > self.expiry_time {
                 return true;
             }
             false
@@ -624,20 +622,20 @@ pub mod std_mod {
     }
 
     pub struct StdTimerCreator {
-        pub check_limit_timeout_secs: u64,
+        pub check_limit_timeout: Duration,
     }
 
     impl StdTimerCreator {
-        pub const fn new(check_limit_timeout_secs: u64) -> Self {
+        pub const fn new(check_limit_timeout: Duration) -> Self {
             Self {
-                check_limit_timeout_secs,
+                check_limit_timeout,
             }
         }
     }
 
     impl Default for StdTimerCreator {
         fn default() -> Self {
-            Self::new(5)
+            Self::new(Duration::from_secs(5))
         }
     }
 
@@ -650,13 +648,9 @@ pub mod std_mod {
                     local_id: _,
                     remote_id: _,
                     entity_type: _,
-                } => StdCountdown::new(self.check_limit_timeout_secs),
-                TimerContext::NakActivity {
-                    expiry_time_seconds,
-                } => StdCountdown::new(Duration::from_secs_f32(expiry_time_seconds).as_secs()),
-                TimerContext::PositiveAck {
-                    expiry_time_seconds,
-                } => StdCountdown::new(Duration::from_secs_f32(expiry_time_seconds).as_secs()),
+                } => StdCountdown::new(self.check_limit_timeout),
+                TimerContext::NakActivity { expiry_time } => StdCountdown::new(expiry_time),
+                TimerContext::PositiveAck { expiry_time } => StdCountdown::new(expiry_time),
             }
         }
     }
@@ -1300,7 +1294,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_std_check_timer() {
-        let mut std_check_timer = StdCountdown::new(1);
+        let mut std_check_timer = StdCountdown::new(Duration::from_secs(1));
         assert!(!std_check_timer.has_expired());
         assert_eq!(std_check_timer.expiry_time_seconds(), 1);
         std::thread::sleep(Duration::from_millis(800));
@@ -1313,9 +1307,9 @@ pub(crate) mod tests {
 
     #[test]
     fn test_std_check_timer_creator() {
-        let std_check_timer_creator = StdTimerCreator::new(1);
+        let std_check_timer_creator = StdTimerCreator::new(Duration::from_secs(1));
         let check_timer = std_check_timer_creator.create_countdown(TimerContext::NakActivity {
-            expiry_time_seconds: 1.0,
+            expiry_time: Duration::from_secs(1),
         });
         assert_eq!(check_timer.expiry_time_seconds(), 1);
     }

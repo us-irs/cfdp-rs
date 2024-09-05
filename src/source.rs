@@ -1155,7 +1155,7 @@ mod tests {
                         max_packet_len,
                         crc_on_transmission_by_default,
                     ),
-                    StdTimerCreator::new(1),
+                    StdTimerCreator::new(core::time::Duration::from_millis(100)),
                     SeqCountProviderSimple::default(),
                 ),
                 srcfile_handle,

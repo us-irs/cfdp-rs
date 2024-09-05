@@ -280,15 +280,7 @@ impl<
         RemoteCfgTable: RemoteEntityConfigProvider,
         TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
         Countdown: CountdownProvider,
-    >
-    DestinationHandler<
-        PduSender,
-        UserFaultHook,
-        Vfs,
-        RemoteCfgTable,
-        TimerCreator,
-        Countdown,
-    >
+    > DestinationHandler<PduSender, UserFaultHook, Vfs, RemoteCfgTable, TimerCreator, Countdown>
 {
     /// Constructs a new destination handler.
     ///
