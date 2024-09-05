@@ -88,7 +88,7 @@ pub enum TransactionStep {
 
 // This contains transfer state parameters for destination transaction.
 #[derive(Debug)]
-struct TransferState<CheckTimer: CountdownProvider> {
+struct TransferState<Countdown: CountdownProvider> {
     transaction_id: Option<TransactionId>,
     metadata_params: MetadataGenericParams,
     progress: u64,
@@ -99,7 +99,7 @@ struct TransferState<CheckTimer: CountdownProvider> {
     completion_disposition: CompletionDisposition,
     checksum: u32,
     current_check_count: u32,
-    current_check_timer: Option<CheckTimer>,
+    current_check_timer: Option<Countdown>,
 }
 
 impl<CheckTimer: CountdownProvider> Default for TransferState<CheckTimer> {
@@ -122,8 +122,8 @@ impl<CheckTimer: CountdownProvider> Default for TransferState<CheckTimer> {
 
 // This contains parameters for destination transaction.
 #[derive(Debug)]
-struct TransactionParams<CheckTimer: CountdownProvider> {
-    tstate: TransferState<CheckTimer>,
+struct TransactionParams<Countdown: CountdownProvider> {
+    tstate: TransferState<Countdown>,
     pdu_conf: CommonPduConfig,
     file_properties: FileProperties,
     cksum_buf: [u8; 1024],
@@ -315,7 +315,7 @@ impl<
         pdu_sender: PduSender,
         vfs: Vfs,
         remote_cfg_table: RemoteCfgTable,
-        check_timer_creator: TimerCreator,
+        timer_creator: TimerCreator,
     ) -> Self {
         Self {
             local_cfg,
@@ -326,7 +326,7 @@ impl<
             pdu_sender,
             vfs,
             remote_cfg_table,
-            check_timer_creator,
+            check_timer_creator: timer_creator,
         }
     }
 

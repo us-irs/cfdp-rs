@@ -238,8 +238,8 @@ impl<
         UserFaultHook: UserFaultHookProvider,
         Vfs: VirtualFilestore,
         RemoteCfgTable: RemoteEntityConfigProvider,
-        CheckTimerCreator: TimerCreatorProvider<Countdown = CheckTimerProvider>,
-        CheckTimerProvider: CountdownProvider,
+        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+        Countdown: CountdownProvider,
         SeqCountProvider: SequenceCountProvider,
     >
     SourceHandler<
@@ -247,8 +247,8 @@ impl<
         UserFaultHook,
         Vfs,
         RemoteCfgTable,
-        CheckTimerCreator,
-        CheckTimerProvider,
+        TimerCreator,
+        Countdown,
         SeqCountProvider,
     >
 {
@@ -269,7 +269,7 @@ impl<
     ///    example 2048 or 4096 bytes.
     /// * `remote_cfg_table` - The [RemoteEntityConfigProvider] used to look up remote
     ///    entities and target specific configuration for file copy operations.
-    /// * `check_timer_creator` - [CheckTimerProviderCreator] used by the CFDP handler to generate
+    /// * `timer_creator` - [TimerCreatorProvider] used by the CFDP handler to generate
     ///    timers required by various tasks. This allows to use this handler for embedded systems
     ///    where the standard time APIs might not be available.
     /// * `seq_count_provider` - The [SequenceCountProvider] used to generate the [TransactionId]
@@ -282,7 +282,7 @@ impl<
         put_request_cacher: StaticPutRequestCacher,
         pdu_and_cksum_buf_size: usize,
         remote_cfg_table: RemoteCfgTable,
-        check_timer_creator: CheckTimerCreator,
+        timer_creator: TimerCreator,
         seq_count_provider: SeqCountProvider,
     ) -> Self {
         Self {
@@ -297,7 +297,7 @@ impl<
             fparams: Default::default(),
             pdu_conf: Default::default(),
             countdown: None,
-            timer_creator: check_timer_creator,
+            timer_creator,
             seq_count_provider,
         }
     }
