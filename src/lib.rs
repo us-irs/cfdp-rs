@@ -588,7 +588,6 @@ pub mod std_mod {
     }
 
     /// Simple implementation of the [CountdownProvider] trait assuming a standard runtime.
-    /// It also assumes that a second accuracy of the check timer period is sufficient.
     #[derive(Debug)]
     pub struct StdCountdown {
         expiry_time: Duration,
