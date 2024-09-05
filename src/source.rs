@@ -1,3 +1,41 @@
+//! # CFDP Source Entity Module
+//!
+//! The [SourceHandler] is the primary component of this module which converts a
+//! [ReadablePutRequest] into all packet data units (PDUs) which need to be sent to a remote
+//! CFDP entity to perform a File Copy operation to a remote entity.
+//!
+//! The source entity allows freedom communication by using a user-provided [PduSendProvider]
+//! to send all generated PDUs. It should be noted that for regular file transfers, each
+//! [SourceHandler::state_machine] call will map to one generated file data PDU. This allows
+//! flow control for the user of the state machine.
+//!
+//! The [SourceHandler::state_machine] will generally perform the following steps after a valid
+//! put request was received through the [SourceHandler::put_request] method:
+//!
+//!  1. Generate the Metadata PDU to be sent to a remote CFDP entity. You can use the
+//!    [spacepackets::cfdp::pdu::metadata::MetadataPduReader] to inspect the generated PDU.
+//!  2. Generate all File Data PDUs to be sent to a remote CFDP entity if applicable (file not
+//!    empty). The PDU(s) can be inspected using the [spacepackets::cfdp::pdu::file_data::FileDataPdu] reader.
+//!  3. Generate an EOF PDU to be sent to a remote CFDP entity. The PDU can be inspected using
+//!    the [spacepackets::cfdp::pdu::eof::EofPdu] reader.
+//!
+//! If this is an unacknowledged transfer with no transaction closure, the file transfer will be
+//! done after these steps. In any other case:
+//!
+//! ### Unacknowledged transfer with requested closure
+//!
+//!  4. A Finished PDU will be awaited, for example one generated using
+//!    [spacepackets::cfdp::pdu::finished::FinishedPduCreator].
+//!
+//! ### Acknowledged transfer (*not implemented yet*)
+//!
+//!  4. A EOF ACK packet will be awaited, for example one generated using
+//!    [spacepackets::cfdp::pdu::ack::AckPdu].
+//!  5. A Finished PDU will be awaited, for example one generated using
+//!    [spacepackets::cfdp::pdu::finished::FinishedPduCreator].
+//!  6. A finished PDU ACK packet will be generated to be sent to the remote CFDP entity.
+//!    The [spacepackets::cfdp::pdu::finished::FinishedPduReader] can be used to inspect the
+//!    generated PDU.
 use core::{cell::RefCell, ops::ControlFlow, str::Utf8Error};
 
 use spacepackets::{

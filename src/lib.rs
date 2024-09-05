@@ -1,5 +1,20 @@
-//! This module contains the implementation of the CFDP high level abstractions as specified in
-//! CCSDS 727.0-B-5.
+//! This module contains the implementation of the CCSDS File Delivery Protocol (CFDP) high level
+//! abstractions as specified in CCSDS 727.0-B-5.
+//!
+//! The basic idea of CFDP is to convert files of any size into a stream of packets called packet
+//! data units (PDU). CFPD has an unacknowledged and acknowledged mode, with the option to request
+//! a transaction closure for the unacknowledged mode. Using the unacknowledged mode with no
+//! transaction closure is applicable for simplex communication paths, while the unacknowledged
+//! mode with closure is the easiest way to get a confirmation of a successful file transfer,
+//! including a CRC check on the remote side to verify file int egrity. The acknowledged mode is
+//! the most complex mode which includes multiple mechanism to ensure succesfull packet transaction
+//! even for unreliable connections, including lost segment detection. As such, it can be compared
+//! to a specialized TCP for file transfers with remote systems.
+//!
+//! The core  of these high-level components are the [crate::dest::DestinationHandler] and the
+//! [crate::source::SourceHandler] component. These model the CFDP destination and source entity
+//! respectively. You can find high-level and API documentation for both handlers in the respective
+//! [crate::dest] and [crate::source] module.
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #[cfg(feature = "alloc")]
