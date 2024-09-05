@@ -108,13 +108,13 @@ pub enum TimerContext {
 ///
 /// ## 3. Positive ACK procedures
 ///
-/// The timer will be used to perform the Positive Acknowledgement Procedures as  specified in
+/// The timer will be used to perform the Positive Acknowledgement Procedures as specified in
 /// 4.7. 1of the CFDP standard. The expiration period will be provided by the Positive ACK timer
 /// interval of the remote entity configuration.
-pub trait CheckTimerProviderCreator {
-    type CheckTimer: CountdownProvider;
+pub trait TimerCreatorProvider {
+    type Countdown: CountdownProvider;
 
-    fn create_check_timer_provider(&self, timer_context: TimerContext) -> Self::CheckTimer;
+    fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown;
 }
 
 /// This structure models the remote entity configuration information as specified in chapter 8.3
@@ -591,12 +591,12 @@ pub mod std_mod {
     /// Simple implementation of the [CountdownProvider] trait assuming a standard runtime.
     /// It also assumes that a second accuracy of the check timer period is sufficient.
     #[derive(Debug)]
-    pub struct StdCheckTimer {
+    pub struct StdCountdown {
         expiry_time_seconds: u64,
         start_time: std::time::Instant,
     }
 
-    impl StdCheckTimer {
+    impl StdCountdown {
         pub fn new(expiry_time_seconds: u64) -> Self {
             Self {
                 expiry_time_seconds,
@@ -609,7 +609,7 @@ pub mod std_mod {
         }
     }
 
-    impl CountdownProvider for StdCheckTimer {
+    impl CountdownProvider for StdCountdown {
         fn has_expired(&self) -> bool {
             let elapsed_time = self.start_time.elapsed();
             if elapsed_time.as_nanos() > self.expiry_time_seconds as u128 * 1_000_000_000 {
@@ -623,11 +623,11 @@ pub mod std_mod {
         }
     }
 
-    pub struct StdCheckTimerCreator {
+    pub struct StdTimerCreator {
         pub check_limit_timeout_secs: u64,
     }
 
-    impl StdCheckTimerCreator {
+    impl StdTimerCreator {
         pub const fn new(check_limit_timeout_secs: u64) -> Self {
             Self {
                 check_limit_timeout_secs,
@@ -635,28 +635,28 @@ pub mod std_mod {
         }
     }
 
-    impl Default for StdCheckTimerCreator {
+    impl Default for StdTimerCreator {
         fn default() -> Self {
             Self::new(5)
         }
     }
 
-    impl CheckTimerProviderCreator for StdCheckTimerCreator {
-        type CheckTimer = StdCheckTimer;
+    impl TimerCreatorProvider for StdTimerCreator {
+        type Countdown = StdCountdown;
 
-        fn create_check_timer_provider(&self, timer_context: TimerContext) -> Self::CheckTimer {
+        fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
             match timer_context {
                 TimerContext::CheckLimit {
                     local_id: _,
                     remote_id: _,
                     entity_type: _,
-                } => StdCheckTimer::new(self.check_limit_timeout_secs),
+                } => StdCountdown::new(self.check_limit_timeout_secs),
                 TimerContext::NakActivity {
                     expiry_time_seconds,
-                } => StdCheckTimer::new(Duration::from_secs_f32(expiry_time_seconds).as_secs()),
+                } => StdCountdown::new(Duration::from_secs_f32(expiry_time_seconds).as_secs()),
                 TimerContext::PositiveAck {
                     expiry_time_seconds,
-                } => StdCheckTimer::new(Duration::from_secs_f32(expiry_time_seconds).as_secs()),
+                } => StdCountdown::new(Duration::from_secs_f32(expiry_time_seconds).as_secs()),
             }
         }
     }
@@ -725,6 +725,8 @@ pub enum PacketTarget {
     DestEntity,
 }
 
+/// Generic trait which models a raw CFDP packet data unit (PDU) block with some additional context
+/// information.
 pub trait PduProvider {
     fn pdu_type(&self) -> PduType;
     fn file_directive_type(&self) -> Option<FileDirectiveType>;
@@ -948,7 +950,7 @@ pub(crate) mod tests {
     };
     use user::{CfdpUser, OwnedMetadataRecvdParams, TransactionFinishedParams};
 
-    use crate::{PacketTarget, StdCheckTimer};
+    use crate::{PacketTarget, StdCountdown};
 
     use super::*;
 
@@ -1298,7 +1300,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_std_check_timer() {
-        let mut std_check_timer = StdCheckTimer::new(1);
+        let mut std_check_timer = StdCountdown::new(1);
         assert!(!std_check_timer.has_expired());
         assert_eq!(std_check_timer.expiry_time_seconds(), 1);
         std::thread::sleep(Duration::from_millis(800));
@@ -1311,11 +1313,10 @@ pub(crate) mod tests {
 
     #[test]
     fn test_std_check_timer_creator() {
-        let std_check_timer_creator = StdCheckTimerCreator::new(1);
-        let check_timer =
-            std_check_timer_creator.create_check_timer_provider(TimerContext::NakActivity {
-                expiry_time_seconds: 1.0,
-            });
+        let std_check_timer_creator = StdTimerCreator::new(1);
+        let check_timer = std_check_timer_creator.create_countdown(TimerContext::NakActivity {
+            expiry_time_seconds: 1.0,
+        });
         assert_eq!(check_timer.expiry_time_seconds(), 1);
     }
 

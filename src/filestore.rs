@@ -155,6 +155,7 @@ pub trait VirtualFilestore {
         &self,
         file_path: &str,
         checksum_type: ChecksumType,
+        size_to_verify: u64,
         verification_buf: &mut [u8],
     ) -> Result<u32, FilestoreError>;
 
@@ -167,13 +168,14 @@ pub trait VirtualFilestore {
     /// 4096 or 8192 bytes.
     fn checksum_verify(
         &self,
+        expected_checksum: u32,
         file_path: &str,
         checksum_type: ChecksumType,
-        expected_checksum: u32,
+        size_to_verify: u64,
         verification_buf: &mut [u8],
     ) -> Result<bool, FilestoreError> {
         Ok(
-            self.calculate_checksum(file_path, checksum_type, verification_buf)?
+            self.calculate_checksum(file_path, checksum_type, size_to_verify, verification_buf)?
                 == expected_checksum,
         )
     }
@@ -326,18 +328,23 @@ pub mod std_mod {
             &self,
             file_path: &str,
             checksum_type: ChecksumType,
+            size_to_verify: u64,
             verification_buf: &mut [u8],
         ) -> Result<u32, FilestoreError> {
             let mut calc_with_crc_lib = |crc: Crc<u32>| -> Result<u32, FilestoreError> {
                 let mut digest = crc.digest();
-                let file_to_check = File::open(file_path)?;
-                let mut buf_reader = BufReader::new(file_to_check);
-                loop {
-                    let bytes_read = buf_reader.read(verification_buf)?;
+                let mut buf_reader = BufReader::new(File::open(file_path)?);
+                let mut remaining_bytes = size_to_verify;
+                while remaining_bytes > 0 {
+                    // Read the smaller of the remaining bytes or the buffer size
+                    let bytes_to_read = remaining_bytes.min(verification_buf.len() as u64) as usize;
+                    let bytes_read = buf_reader.read(&mut verification_buf[0..bytes_to_read])?;
+
                     if bytes_read == 0 {
-                        break;
+                        break; // Reached end of file
                     }
                     digest.update(&verification_buf[0..bytes_read]);
+                    remaining_bytes -= bytes_read as u64;
                 }
                 Ok(digest.finalize())
             };
@@ -776,9 +783,10 @@ mod tests {
         checksum = checksum.wrapping_add(u32::from_be_bytes(buffer));
         let mut verif_buf: [u8; 32] = [0; 32];
         let result = NATIVE_FS.checksum_verify(
+            checksum,
             file_path.to_str().unwrap(),
             ChecksumType::Modular,
-            checksum,
+            EXAMPLE_DATA_CFDP.len() as u64,
             &mut verif_buf,
         );
         assert!(result.is_ok());
@@ -791,6 +799,7 @@ mod tests {
         // The file to check does not even need to exist, and the verification buffer can be
         // empty: the null checksum is always yields the same result.
         let result = NATIVE_FS.checksum_verify(
+            0,
             file_path.to_str().unwrap(),
             ChecksumType::NullChecksum,
             0,
@@ -807,6 +816,7 @@ mod tests {
         // The file to check does not even need to exist, and the verification buffer can be
         // empty: the null checksum is always yields the same result.
         let result = NATIVE_FS.checksum_verify(
+            0,
             file_path.to_str().unwrap(),
             ChecksumType::Crc32Proximity1,
             0,

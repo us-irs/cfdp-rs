@@ -15,7 +15,7 @@ use cfdp::{
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
     EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, PduProvider,
-    RemoteEntityConfig, StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
+    RemoteEntityConfig, StdTimerCreator, TransactionId, UserFaultHookProvider,
 };
 use clap::Parser;
 use log::{debug, info, warn};
@@ -346,6 +346,7 @@ fn main() {
         put_request_cacher,
         2048,
         remote_cfg_python,
+        StdTimerCreator::default(),
         seq_count_provider,
     );
     let mut cfdp_user_source = ExampleCfdpUser::new(EntityType::Sending);
@@ -361,7 +362,7 @@ fn main() {
         dest_tm_tx,
         NativeFilestore::default(),
         remote_cfg_python,
-        StdCheckTimerCreator::default(),
+        StdTimerCreator::default(),
     );
     let mut cfdp_user_dest = ExampleCfdpUser::new(EntityType::Receiving);
 

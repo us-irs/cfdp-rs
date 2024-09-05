@@ -24,7 +24,7 @@
 //!
 //!  3. Finished PDU has been sent back to the remote side.
 //!
-//! ### Acknowledged mode
+//! ### Acknowledged mode (*not implemented yet*)
 //!
 //!  3. An EOF ACK PDU has been sent back to the remote side.
 //!  4. A Finished PDU has been sent back to the remote side.
@@ -35,10 +35,10 @@ use core::str::{from_utf8, from_utf8_unchecked, Utf8Error};
 use super::{
     filestore::{FilestoreError, NativeFilestore, VirtualFilestore},
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams},
-    CheckTimerProviderCreator, CountdownProvider, EntityType, LocalEntityConfig, PacketTarget,
-    PduSendProvider, RemoteEntityConfig, RemoteEntityConfigProvider, State, StdCheckTimer,
-    StdCheckTimerCreator, StdRemoteEntityConfigProvider, TimerContext, TransactionId,
-    UserFaultHookProvider,
+    CountdownProvider, EntityType, LocalEntityConfig, PacketTarget, PduSendProvider,
+    RemoteEntityConfig, RemoteEntityConfigProvider, State, StdCountdown,
+    StdRemoteEntityConfigProvider, StdTimerCreator, TimerContext, TimerCreatorProvider,
+    TransactionId, UserFaultHookProvider,
 };
 use smallvec::SmallVec;
 use spacepackets::{
@@ -249,7 +249,7 @@ pub struct DestinationHandler<
     UserFaultHook: UserFaultHookProvider,
     Vfs: VirtualFilestore,
     RemoteCfgTable: RemoteEntityConfigProvider,
-    CheckTimerCreator: CheckTimerProviderCreator<CheckTimer = CheckTimerProvider>,
+    CheckTimerCreator: TimerCreatorProvider<Countdown = CheckTimerProvider>,
     CheckTimerProvider: CountdownProvider,
 > {
     local_cfg: LocalEntityConfig<UserFaultHook>,
@@ -269,8 +269,8 @@ pub type StdDestinationHandler<PduSender, UserFaultHook> = DestinationHandler<
     UserFaultHook,
     NativeFilestore,
     StdRemoteEntityConfigProvider,
-    StdCheckTimerCreator,
-    StdCheckTimer,
+    StdTimerCreator,
+    StdCountdown,
 >;
 
 impl<
@@ -278,7 +278,7 @@ impl<
         UserFaultHook: UserFaultHookProvider,
         Vfs: VirtualFilestore,
         RemoteCfgTable: RemoteEntityConfigProvider,
-        CheckTimerCreator: CheckTimerProviderCreator<CheckTimer = CheckTimerProvider>,
+        CheckTimerCreator: TimerCreatorProvider<Countdown = CheckTimerProvider>,
         CheckTimerProvider: CountdownProvider,
     >
     DestinationHandler<
@@ -601,6 +601,7 @@ impl<
             file_delivery_complete = true;
         } else {
             match self.vfs.checksum_verify(
+                checksum,
                 // Safety: It was already verified that the path is valid during the transaction start.
                 unsafe {
                     from_utf8_unchecked(
@@ -609,7 +610,7 @@ impl<
                     )
                 },
                 self.tparams.metadata_params().checksum_type,
-                checksum,
+                self.tparams.tstate.progress,
                 &mut self.tparams.cksum_buf,
             ) {
                 Ok(checksum_success) => {
@@ -642,14 +643,13 @@ impl<
 
     fn start_check_limit_handling(&mut self) {
         self.step = TransactionStep::ReceivingFileDataPdusWithCheckLimitHandling;
-        self.tparams.tstate.current_check_timer = Some(
-            self.check_timer_creator
-                .create_check_timer_provider(TimerContext::CheckLimit {
-                    local_id: self.local_cfg.id,
-                    remote_id: self.tparams.remote_cfg.unwrap().entity_id,
-                    entity_type: EntityType::Receiving,
-                }),
-        );
+        self.tparams.tstate.current_check_timer = Some(self.check_timer_creator.create_countdown(
+            TimerContext::CheckLimit {
+                local_id: self.local_cfg.id,
+                remote_id: self.tparams.remote_cfg.unwrap().entity_id,
+                entity_type: EntityType::Receiving,
+            },
+        ));
         self.tparams.tstate.current_check_count = 0;
     }
 
@@ -951,8 +951,8 @@ mod tests {
             basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler,
             LOCAL_ID,
         },
-        CheckTimerProviderCreator, CountdownProvider, FaultHandler, IndicationConfig,
-        PduRawWithInfo, StdRemoteEntityConfigProvider, CRC_32,
+        CountdownProvider, FaultHandler, IndicationConfig, PduRawWithInfo,
+        StdRemoteEntityConfigProvider, TimerCreatorProvider, CRC_32,
     };
 
     use super::*;
@@ -995,10 +995,10 @@ mod tests {
         }
     }
 
-    impl CheckTimerProviderCreator for TestCheckTimerCreator {
-        type CheckTimer = TestCheckTimer;
+    impl TimerCreatorProvider for TestCheckTimerCreator {
+        type Countdown = TestCheckTimer;
 
-        fn create_check_timer_provider(&self, timer_context: TimerContext) -> Self::CheckTimer {
+        fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
             match timer_context {
                 TimerContext::CheckLimit { .. } => {
                     TestCheckTimer::new(self.check_limit_expired_flag.clone())

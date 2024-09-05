@@ -14,7 +14,7 @@ use cfdp::{
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
     EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
-    StdCheckTimerCreator, TransactionId, UserFaultHookProvider,
+    StdTimerCreator, TransactionId, UserFaultHookProvider,
 };
 use spacepackets::{
     cfdp::{ChecksumType, ConditionCode, TransmissionMode},
@@ -202,6 +202,7 @@ fn end_to_end_test(with_closure: bool) {
         put_request_cacher,
         2048,
         remote_cfg_of_dest,
+        StdTimerCreator::default(),
         seq_count_provider,
     );
     let mut cfdp_user_source = ExampleCfdpUser::new(EntityType::Sending, completion_signal_source);
@@ -225,7 +226,7 @@ fn end_to_end_test(with_closure: bool) {
         dest_tx,
         NativeFilestore::default(),
         remote_cfg_of_source,
-        StdCheckTimerCreator::default(),
+        StdTimerCreator::default(),
     );
     let mut cfdp_user_dest = ExampleCfdpUser::new(EntityType::Receiving, completion_signal_dest);
 
