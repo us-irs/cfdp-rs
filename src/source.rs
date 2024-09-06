@@ -1606,4 +1606,9 @@ mod tests {
             panic!("unexpected error type: {:?}", error);
         }
     }
+
+    #[test]
+    fn test_finished_pdu_check_timeout() {
+        // TODO: Implement.
+    }
 }
