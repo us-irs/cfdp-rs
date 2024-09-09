@@ -808,13 +808,16 @@ impl<
             .disposition_on_cancellation
             && self.tstate().delivery_code == DeliveryCode::Incomplete
         {
-            // Safety: We already verified that the path is valid during the transaction start.
-            self.vfs.remove_file(unsafe {
+            let dest_path = unsafe {
                 from_utf8_unchecked(
                     &self.tparams.file_properties.dest_path_buf
                         [0..self.tparams.file_properties.dest_file_path_len],
                 )
-            })?;
+            };
+            if self.vfs.exists(dest_path)? && self.vfs.is_file(dest_path)? {
+                self.vfs.remove_file(dest_path)?;
+            }
+            // Safety: We already verified that the path is valid during the transaction start.
             self.tstate_mut().file_status = FileStatus::DiscardDeliberately;
         }
         let tstate = self.tstate();
@@ -1027,12 +1030,21 @@ mod tests {
 
     impl DestHandlerTestbench {
         fn new(fault_handler: TestFaultHandler, closure_requested: bool) -> Self {
+            let (src_path, dest_path) = init_full_filepaths_textfile();
+            assert!(!Path::exists(&dest_path));
+            Self::new_with_custom_paths(fault_handler, closure_requested, src_path, dest_path)
+        }
+
+        fn new_with_custom_paths(
+            fault_handler: TestFaultHandler,
+            closure_requested: bool,
+            src_path: PathBuf,
+            dest_path: PathBuf,
+        ) -> Self {
             let check_timer_expired = Arc::new(AtomicBool::new(false));
             let test_sender = TestCfdpSender::default();
             let dest_handler =
                 default_dest_handler(fault_handler, test_sender, check_timer_expired.clone());
-            let (src_path, dest_path) = init_full_filepaths_textfile();
-            assert!(!Path::exists(&dest_path));
             let handler = Self {
                 check_timer_expired,
                 handler: dest_handler,
@@ -1657,5 +1669,25 @@ mod tests {
     }
 
     #[test]
-    fn test_file_copy_to_directory() {}
+    fn test_file_copy_to_directory() {
+        let fault_handler = TestFaultHandler::default();
+        let src_path = tempfile::TempPath::from_path("/tmp/test.txt").to_path_buf();
+        let dest_path = tempfile::TempDir::new().unwrap();
+        let mut dest_path_buf = dest_path.into_path();
+        let mut tb = DestHandlerTestbench::new_with_custom_paths(
+            fault_handler,
+            false,
+            src_path.clone(),
+            dest_path_buf.clone(),
+        );
+        dest_path_buf.push(src_path.file_name().unwrap());
+        tb.dest_path = dest_path_buf;
+        let mut test_user = tb.test_user_from_cached_paths(0);
+        tb.generic_transfer_init(&mut test_user, 0)
+            .expect("transfer init failed");
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_eof_no_error(&mut test_user, Vec::new())
+            .expect("EOF no error insertion failed");
+        tb.check_completion_indication_success(&mut test_user);
+    }
 }

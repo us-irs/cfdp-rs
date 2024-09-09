@@ -462,7 +462,11 @@ impl<
     /// If not unexpected errors occur, this method returns [true] if the transfer was cancelled
     /// propery and [false] if there is no transaction active or the passed transaction ID and the
     /// active ID do not match.
-    pub fn cancel_request(&mut self, user: &mut impl CfdpUser, transaction_id: &TransactionId) -> Result<bool, SourceError> {
+    pub fn cancel_request(
+        &mut self,
+        user: &mut impl CfdpUser,
+        transaction_id: &TransactionId,
+    ) -> Result<bool, SourceError> {
         if self.state_helper.state == super::State::Idle {
             return Ok(false);
         }
@@ -875,7 +879,11 @@ impl<
         Ok(true)
     }
 
-    fn prepare_and_send_eof_pdu(&mut self, cfdp_user: &mut impl CfdpUser, checksum: u32) -> Result<(), SourceError> {
+    fn prepare_and_send_eof_pdu(
+        &mut self,
+        cfdp_user: &mut impl CfdpUser,
+        checksum: u32,
+    ) -> Result<(), SourceError> {
         let tstate = self
             .tstate
             .as_ref()
@@ -989,11 +997,9 @@ impl<
             spacepackets::cfdp::FaultHandlerCode::IgnoreError => (),
             spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => self.abandon_transaction(),
         }
-        self.local_cfg.fault_handler.report_fault(
-            transaction_id,
-            cond,
-            progress,
-        );
+        self.local_cfg
+            .fault_handler
+            .report_fault(transaction_id, cond, progress);
         Ok(())
     }
 
@@ -1033,8 +1039,8 @@ impl<
             // We are done.
             self.reset();
         } else {
-            self.state_helper.step = TransactionStep::WaitingForEofAck; 
-        } 
+            self.state_helper.step = TransactionStep::WaitingForEofAck;
+        }
         Ok(ControlFlow::Continue(()))
     }
 
