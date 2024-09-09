@@ -92,9 +92,11 @@ struct TransferState<Countdown: CountdownProvider> {
     transaction_id: Option<TransactionId>,
     metadata_params: MetadataGenericParams,
     progress: u64,
+    file_size_eof: u64,
     metadata_only: bool,
     condition_code: ConditionCode,
     delivery_code: DeliveryCode,
+    fault_location_finished: Option<EntityIdTlv>,
     file_status: FileStatus,
     completion_disposition: CompletionDisposition,
     checksum: u32,
@@ -108,9 +110,11 @@ impl<CheckTimer: CountdownProvider> Default for TransferState<CheckTimer> {
             transaction_id: None,
             metadata_params: Default::default(),
             progress: Default::default(),
+            file_size_eof: Default::default(),
             metadata_only: false,
             condition_code: ConditionCode::NoError,
             delivery_code: DeliveryCode::Incomplete,
+            fault_location_finished: None,
             file_status: FileStatus::Unreported,
             completion_disposition: CompletionDisposition::Completed,
             checksum: 0,
@@ -241,9 +245,14 @@ pub enum DestError {
 /// allocation is prohibited. Furthermore, it uses the [VirtualFilestore] abstraction to allow
 /// usage on systems without a [std] filesystem.
 ///
-/// This handler does not support concurrency out of the box. Instead, if concurrent handling
-/// is required, it is recommended to create a new handler and run all active handlers inside a
-/// thread pool, or move the newly created handler to a new thread.
+/// This handler is able to deal with file copy operations to directories, similarly to how the
+/// UNIX tool `cp` works. If the destination path is a directory instead of a regular  full path,
+/// the source path base file name will be appended to the destination path to form the resulting
+/// new full path.
+///
+// This handler also does not support concurrency out of the box but is flexible enough to be used
+/// in different concurrent contexts. For example, you can dynamically create new handlers and
+/// run them inside a thread pool, or move the newly created handler to a new thread."""
 pub struct DestinationHandler<
     PduSender: PduSendProvider,
     UserFaultHook: UserFaultHookProvider,
@@ -356,6 +365,10 @@ impl<
                 Ok(0)
             }
         }
+    }
+
+    pub fn cancel_request(&mut self, transaction_id: &TransactionId) {
+        // TODO: Implement.
     }
 
     /// Returns [None] if the state machine is IDLE, and the transmission mode of the current
@@ -534,12 +547,24 @@ impl<
         let regular_transfer_finish = if eof_pdu.condition_code() == ConditionCode::NoError {
             self.handle_no_error_eof_pdu(&eof_pdu)?
         } else {
-            return Err(DestError::NotImplemented);
+            // This is an EOF (Cancel), perform Cancel Response Procedures according to chapter
+            // 4.6.6 of the standard.
+            self.trigger_notice_of_completion_cancelled(eof_pdu.condition_code());
+            self.tparams.tstate.progress = eof_pdu.file_size();
+            self.tparams.tstate.delivery_code = DeliveryCode::Incomplete;
+            self.tparams.tstate.fault_location_finished =
+                Some(EntityIdTlv::new(self.tparams.remote_cfg.unwrap().entity_id));
+            true
         };
         if regular_transfer_finish {
             self.file_transfer_complete_transition();
         }
         Ok(())
+    }
+
+    fn trigger_notice_of_completion_cancelled(&mut self, cond_code: ConditionCode) {
+        self.tparams.tstate.completion_disposition = CompletionDisposition::Cancelled;
+        self.tparams.tstate.condition_code = cond_code;
     }
 
     /// Returns whether the transfer can be completed regularly.
@@ -886,14 +911,13 @@ impl<
         {
             FinishedPduCreator::new_default(pdu_header, tstate.delivery_code, tstate.file_status)
         } else {
-            // TODO: Are there cases where this ID is actually the source entity ID?
-            let entity_id = EntityIdTlv::new(self.local_cfg.id);
-            FinishedPduCreator::new_with_error(
+            FinishedPduCreator::new_generic(
                 pdu_header,
                 tstate.condition_code,
                 tstate.delivery_code,
                 tstate.file_status,
-                entity_id,
+                &[],
+                tstate.fault_location_finished,
             )
         };
         finished_pdu.write_to_bytes(&mut self.packet_buf)?;
@@ -1690,4 +1714,7 @@ mod tests {
             .expect("EOF no error insertion failed");
         tb.check_completion_indication_success(&mut test_user);
     }
+
+    #[test]
+    fn test_tranfer_cancellation() {}
 }
