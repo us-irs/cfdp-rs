@@ -866,7 +866,7 @@ impl<
             .get_fault_handler(condition_code);
         match fh_code {
             FaultHandlerCode::NoticeOfCancellation => {
-                self.notice_of_cancellation(condition_code);
+                self.notice_of_cancellation(condition_code, EntityIdTlv::new(self.local_cfg().id));
             }
             FaultHandlerCode::NoticeOfSuspension => self.notice_of_suspension(),
             FaultHandlerCode::IgnoreError => (),
@@ -877,9 +877,14 @@ impl<
             .report_fault(transaction_id, condition_code, progress)
     }
 
-    fn notice_of_cancellation(&mut self, condition_code: ConditionCode) {
+    fn notice_of_cancellation(
+        &mut self,
+        condition_code: ConditionCode,
+        fault_location: EntityIdTlv,
+    ) {
         self.step = TransactionStep::TransferCompletion;
         self.tstate_mut().condition_code = condition_code;
+        self.tstate_mut().fault_location_finished = Some(fault_location);
         self.tstate_mut().completion_disposition = CompletionDisposition::Cancelled;
     }
 
