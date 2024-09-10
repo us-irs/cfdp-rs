@@ -554,6 +554,10 @@ impl<
             self.tparams.tstate.delivery_code = DeliveryCode::Incomplete;
             self.tparams.tstate.fault_location_finished =
                 Some(EntityIdTlv::new(self.tparams.remote_cfg.unwrap().entity_id));
+            // TODO: The cancel EOF also supplies a checksum and a progress number. We could cross
+            // check that checksum, but how would we deal with a checksum failure? The standard
+            // does not specify anything for this case.. It could be part of the status report
+            // issued to the user though.
             true
         };
         if regular_transfer_finish {
@@ -1721,5 +1725,94 @@ mod tests {
     }
 
     #[test]
-    fn test_tranfer_cancellation() {}
+    fn test_tranfer_cancellation_empty_file_with_eof_pdu() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new(fault_handler, false);
+        let mut test_user = tb.test_user_from_cached_paths(0);
+        tb.generic_transfer_init(&mut test_user, 0)
+            .expect("transfer init failed");
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        let cancel_eof = EofPdu::new(
+            tb.pdu_header,
+            ConditionCode::CancelRequestReceived,
+            0,
+            0,
+            Some(EntityIdTlv::new(LOCAL_ID.into())),
+        );
+        let packets = tb
+            .handler
+            .state_machine(
+                &mut test_user,
+                Some(&PduRawWithInfo::new(&cancel_eof.to_vec().unwrap()).unwrap()),
+            )
+            .expect("state machine call with EOF insertion failed");
+        assert_eq!(packets, 0);
+    }
+
+    fn generic_tranfer_cancellation_partial_file_with_eof_pdu_no_closure(with_closure: bool) {
+        let file_data_str = "Hello World!";
+        let file_data = file_data_str.as_bytes();
+        let file_size = file_data.len() as u64;
+
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new(fault_handler, with_closure);
+        let mut test_user = tb.test_user_from_cached_paths(file_size);
+        tb.generic_transfer_init(&mut test_user, file_size)
+            .expect("transfer init failed");
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_file_data_insert(&mut test_user, 0, &file_data[0..5])
+            .expect("file data insertion failed");
+        // Checksum is currently ignored on remote side.. we still supply it, according to the
+        // standard.
+        let mut digest = CRC_32.digest();
+        digest.update(&file_data[0..5]);
+        let checksum = digest.finalize();
+        let cancel_eof = EofPdu::new(
+            tb.pdu_header,
+            ConditionCode::CancelRequestReceived,
+            checksum,
+            5,
+            Some(EntityIdTlv::new(LOCAL_ID.into())),
+        );
+        let packets = tb
+            .handler
+            .state_machine(
+                &mut test_user,
+                Some(&PduRawWithInfo::new(&cancel_eof.to_vec().unwrap()).unwrap()),
+            )
+            .expect("state machine call with EOF insertion failed");
+        if with_closure {
+            assert_eq!(packets, 1);
+            let finished_pdu = tb.handler.pdu_sender.retrieve_next_pdu().unwrap();
+            assert_eq!(finished_pdu.pdu_type, PduType::FileDirective);
+            assert_eq!(
+                finished_pdu.file_directive_type.unwrap(),
+                FileDirectiveType::FinishedPdu
+            );
+            let finished_pdu = FinishedPduReader::from_bytes(&finished_pdu.raw_pdu).unwrap();
+            assert_eq!(
+                finished_pdu.condition_code(),
+                ConditionCode::CancelRequestReceived
+            );
+            assert_eq!(finished_pdu.delivery_code(), DeliveryCode::Incomplete);
+            assert_eq!(finished_pdu.file_status(), FileStatus::Retained);
+            assert_eq!(
+                finished_pdu
+                    .fault_location()
+                    .expect("no fault location set"),
+                EntityIdTlv::new(LOCAL_ID.into())
+            );
+        } else {
+            assert_eq!(packets, 0);
+        }
+    }
+
+    #[test]
+    fn test_tranfer_cancellation_partial_file_with_eof_pdu_no_closure() {
+        generic_tranfer_cancellation_partial_file_with_eof_pdu_no_closure(false);
+    }
+    #[test]
+    fn test_tranfer_cancellation_partial_file_with_eof_pdu_with_closure() {
+        generic_tranfer_cancellation_partial_file_with_eof_pdu_no_closure(true);
+    }
 }
