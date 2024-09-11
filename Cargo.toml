@@ -20,6 +20,10 @@ crc = "3"
 smallvec = "1"
 derive-new = "0.6"
 
+[dependencies.spacepackets]
+version = "0.12"
+default-features = false
+
 [dependencies.thiserror]
 version = "1"
 optional = true
@@ -31,10 +35,6 @@ optional = true
 [dependencies.serde]
 version = "1"
 optional = true
-
-[dependencies.spacepackets]
-version = "0.12"
-default-features = false
 
 [dependencies.defmt]
 version = "0.3"

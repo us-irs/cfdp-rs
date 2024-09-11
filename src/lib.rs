@@ -11,8 +11,17 @@
 //! even for unreliable connections, including lost segment detection. As such, it can be compared
 //! to a specialized TCP for file transfers with remote systems.
 //!
-//! The core  of these high-level components are the [crate::dest::DestinationHandler] and the
-//! [crate::source::SourceHandler] component. These model the CFDP destination and source entity
+//! The goal of this library is to be flexible enough to support the use-cases of both on-board
+//! software and of ground software. It has support to make integration on [std] systems as simple
+//! as possible, but also has sufficient abstraction to allow for integration on `no_std`
+//! environments. Currently, the handlers still require the [std] feature until
+//! [thiserror supports `error_in_core`](https://github.com/dtolnay/thiserror/pull/304).
+//! It is recommended to activate the `alloc` feature at the very least to allow using the primary
+//! components provided by this crate. These components will only allocate memory at initialization
+//! time and thus are still viable for systems where run-time allocation is prohibited.
+//!
+//! The core of this library are the [crate::dest::DestinationHandler] and the
+//! [crate::source::SourceHandler] components which model the CFDP destination and source entity
 //! respectively. You can find high-level and API documentation for both handlers in the respective
 //! [crate::dest] and [crate::source] module.
 //!
@@ -20,9 +29,6 @@
 //!
 //! This library currently features two example application which showcase how the provided
 //! components could be used to provide CFDP services.
-//! Both examples feature implementations of the [UserFaultHookProvider] and the [user::CfdpUser]
-//! trait which simply print some information to the console to monitor the progress of a file
-//! copy operation.
 //!
 //! The [end-to-end test](https://egit.irs.uni-stuttgart.de/rust/cfdp/src/branch/main/tests/end-to-end.rs)
 //! is an integration tests which spawns a CFDP source entity and a CFDP destination entity,
@@ -43,6 +49,20 @@
 //! The [Python Interoperability](https://egit.irs.uni-stuttgart.de/rust/cfdp/src/branch/main/examples/python-interop)
 //! example showcases the interoperability of the CFDP handlers written in Rust with a Python
 //! implementation. The dedicated example documentation shows how to run this example.
+//!
+//! # Notes on the user hooks and scheduling
+//!
+//! Both examples feature implementations of the [UserFaultHookProvider] and the [user::CfdpUser]
+//! trait which simply print some information to the console to monitor the progress of a file
+//! copy operation. These implementations could be adapted for other handler integrations. For
+//! example, they could signal a GUI application to display some information for the user.
+//!
+//! Even though both examples move the newly spawned handlers to dedicated threads, this is not
+//! the only way they could be scheduled. For example, to support an arbitrary (or bounded)
+//! amount of file copy operations on either source or destination side, those handlers could be
+//! moved into a [std::collections::HashMap] structure which is then scheduled inside a thread, or
+//! you could schedule a fixed amount of handlers inside a
+//! [threadpool](https://docs.rs/threadpool/latest/threadpool/).
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #[cfg(feature = "alloc")]
