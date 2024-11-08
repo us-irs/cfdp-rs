@@ -1,101 +1,36 @@
-use alloc::string::{String, ToString};
-use core::fmt::Display;
 use spacepackets::cfdp::ChecksumType;
 use spacepackets::ByteConversionError;
 #[cfg(feature = "std")]
-use std::error::Error;
-use std::path::Path;
-#[cfg(feature = "std")]
 pub use std_mod::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, thiserror::Error)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum FilestoreError {
+    #[error("file does not exist")]
     FileDoesNotExist,
+    #[error("file already exists")]
     FileAlreadyExists,
+    #[error("directory does not exist")]
     DirDoesNotExist,
+    #[error("permission error")]
     Permission,
+    #[error("is not a file")]
     IsNotFile,
+    #[error("is not a directory")]
     IsNotDirectory,
-    ByteConversion(ByteConversionError),
-    Io {
-        raw_errno: Option<i32>,
-        string: String,
-    },
+    #[error("byte conversion: {0}")]
+    ByteConversion(#[from] ByteConversionError),
+    #[error("IO error: {0})")]
+    #[cfg(feature = "std")]
+    Io(#[from] std::io::Error),
+    #[error("checksum type not implemented: {0:?}")]
     ChecksumTypeNotImplemented(ChecksumType),
+    #[error("utf8 error")]
     Utf8Error,
+    #[error("other error")]
     Other,
-}
-
-impl From<ByteConversionError> for FilestoreError {
-    fn from(value: ByteConversionError) -> Self {
-        Self::ByteConversion(value)
-    }
-}
-
-impl Display for FilestoreError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            FilestoreError::FileDoesNotExist => {
-                write!(f, "file does not exist")
-            }
-            FilestoreError::FileAlreadyExists => {
-                write!(f, "file already exists")
-            }
-            FilestoreError::DirDoesNotExist => {
-                write!(f, "directory does not exist")
-            }
-            FilestoreError::Permission => {
-                write!(f, "permission error")
-            }
-            FilestoreError::IsNotFile => {
-                write!(f, "is not a file")
-            }
-            FilestoreError::IsNotDirectory => {
-                write!(f, "is not a directory")
-            }
-            FilestoreError::ByteConversion(e) => {
-                write!(f, "filestore error: {e}")
-            }
-            FilestoreError::Io { raw_errno, string } => {
-                write!(
-                    f,
-                    "filestore generic IO error with raw errno {:?}: {}",
-                    raw_errno, string
-                )
-            }
-            FilestoreError::ChecksumTypeNotImplemented(checksum_type) => {
-                write!(f, "checksum {:?} not implemented", checksum_type)
-            }
-            FilestoreError::Utf8Error => {
-                write!(f, "utf8 error")
-            }
-            FilestoreError::Other => {
-                write!(f, "some filestore error occured")
-            }
-        }
-    }
-}
-
-impl Error for FilestoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            FilestoreError::ByteConversion(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl From<std::io::Error> for FilestoreError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io {
-            raw_errno: value.raw_os_error(),
-            string: value.to_string(),
-        }
-    }
 }
 
 pub trait VirtualFilestore {
@@ -122,14 +57,7 @@ pub trait VirtualFilestore {
 
     fn filename_from_full_path(path: &str) -> Option<&str>
     where
-        Self: Sized,
-    {
-        // Convert the path string to a Path
-        let path = Path::new(path);
-
-        // Extract the file name using the file_name() method
-        path.file_name().and_then(|name| name.to_str())
-    }
+        Self: Sized;
 
     fn is_file(&self, path: &str) -> Result<bool, FilestoreError>;
 
@@ -193,7 +121,7 @@ pub mod std_mod {
     use super::*;
     use std::{
         fs::{self, File, OpenOptions},
-        io::{BufReader, Read, Seek, SeekFrom, Write},
+        io::{BufReader, Read, Seek, SeekFrom, Write}, path::Path,
     };
 
     #[derive(Default)]
@@ -241,10 +169,7 @@ pub mod std_mod {
         }
 
         fn create_dir(&self, dir_path: &str) -> Result<(), FilestoreError> {
-            fs::create_dir(dir_path).map_err(|e| FilestoreError::Io {
-                raw_errno: e.raw_os_error(),
-                string: e.to_string(),
-            })?;
+            fs::create_dir(dir_path)?;
             Ok(())
         }
 
@@ -358,6 +283,17 @@ pub mod std_mod {
                 _ => Err(FilestoreError::ChecksumTypeNotImplemented(checksum_type)),
             }
         }
+
+        fn filename_from_full_path(path: &str) -> Option<&str>
+        where
+            Self: Sized,
+        {
+            // Convert the path string to a Path
+            let path = Path::new(path);
+
+            // Extract the file name using the file_name() method
+            path.file_name().and_then(|name| name.to_str())
+        }
     }
 
     impl NativeFilestore {
@@ -393,7 +329,7 @@ pub mod std_mod {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, println};
+    use std::{fs, path::Path, println, string::ToString};
 
     use super::*;
     use alloc::format;

@@ -748,25 +748,6 @@ impl<
     }
 
     fn notice_of_completion(&mut self, cfdp_user: &mut impl CfdpUser) {
-        /*
-        def _notice_of_completion(self):
-            if self.cfg.indication_cfg.transaction_finished_indication_required:
-                assert self._params.transaction_id is not None
-                # This happens for unacknowledged file copy operation with no closure.
-                if self._params.finished_params is None:
-                    self._params.finished_params = FinishedParams(
-                        condition_code=ConditionCode.NO_ERROR,
-                        delivery_code=DeliveryCode.DATA_COMPLETE,
-                        file_status=FileStatus.FILE_STATUS_UNREPORTED,
-                    )
-                indication_params = TransactionFinishedParams(
-                    transaction_id=self._params.transaction_id,
-                    finished_params=self._params.finished_params,
-                )
-                self.user.transaction_finished_indication(indication_params)
-            # Transaction finished
-            self.reset()
-                */
         let tstate = self.tstate.as_ref().unwrap();
         if self.local_cfg.indication_cfg.transaction_finished {
             // The first case happens for unacknowledged file copy operation with no closure.

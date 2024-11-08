@@ -14,11 +14,12 @@
 //! The goal of this library is to be flexible enough to support the use-cases of both on-board
 //! software and of ground software. It has support to make integration on [std] systems as simple
 //! as possible, but also has sufficient abstraction to allow for integration on `no_std`
-//! environments. Currently, the handlers still require the [std] feature until
-//! [thiserror supports `error_in_core`](https://github.com/dtolnay/thiserror/pull/304).
-//! It is recommended to activate the `alloc` feature at the very least to allow using the primary
-//! components provided by this crate. These components will only allocate memory at initialization
-//! time and thus are still viable for systems where run-time allocation is prohibited.
+//! environments and can be used on these systems as well as long as the [alloc] feature is used
+//! as well.
+//!
+//! Please note even though the [alloc] feature is required for the core handlers, these components
+//! will only allocate memory at initialization time and thus are still viable for systems where
+//! run-time allocation is prohibited.
 //!
 //! The core of this library are the [crate::dest::DestinationHandler] and the
 //! [crate::source::SourceHandler] components which model the CFDP destination and source entity
@@ -70,12 +71,11 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
-#[cfg(feature = "std")]
-pub mod dest;
 #[cfg(feature = "alloc")]
+pub mod dest;
 pub mod filestore;
 pub mod request;
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 pub mod source;
 pub mod time;
 pub mod user;
@@ -83,8 +83,6 @@ pub mod user;
 use crate::time::CountdownProvider;
 use core::{cell::RefCell, fmt::Debug, hash::Hash};
 use crc::{Crc, CRC_32_ISCSI, CRC_32_ISO_HDLC};
-#[cfg(feature = "std")]
-use hashbrown::HashMap;
 
 #[cfg(feature = "alloc")]
 pub use alloc_mod::*;
@@ -288,12 +286,12 @@ pub trait RemoteEntityConfigProvider {
     fn remove_config(&mut self, remote_id: u64) -> bool;
 }
 
-/// This is a thin wrapper around a [HashMap] to store remote entity configurations.
+/// This is a thin wrapper around a [hashbrown::HashMap] to store remote entity configurations.
 /// It implements the full [RemoteEntityConfigProvider] trait.
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 #[derive(Default, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct StdRemoteEntityConfigProvider(pub HashMap<u64, RemoteEntityConfig>);
+pub struct StdRemoteEntityConfigProvider(pub hashbrown::HashMap<u64, RemoteEntityConfig>);
 
 #[cfg(feature = "std")]
 impl RemoteEntityConfigProvider for StdRemoteEntityConfigProvider {
@@ -879,7 +877,7 @@ impl<'raw> PduRawWithInfo<'raw> {
             });
         }
         if pdu_header.pdu_datafield_len() < 1 {
-            return Err(PduError::FormatError);
+            return Err(PduError::Format);
         }
         // Route depending on PDU type and directive type if applicable. Retrieve directive type
         // from the raw stream for better performance (with sanity and directive code check).
@@ -1548,7 +1546,7 @@ pub(crate) mod tests {
 
     #[test]
     fn transaction_id_hashable_usable_as_map_key() {
-        let mut map = HashMap::new();
+        let mut map = hashbrown::HashMap::new();
         let transaction_id_0 = TransactionId::new(
             UnsignedByteFieldU8::new(1).into(),
             UnsignedByteFieldU8::new(2).into(),
