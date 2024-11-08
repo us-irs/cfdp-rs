@@ -4,8 +4,7 @@ use spacepackets::ByteConversionError;
 pub use std_mod::*;
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(all(feature = "defmt", not(feature = "std")), derive(defmt::Format))]
 #[non_exhaustive]
 pub enum FilestoreError {
     #[error("file does not exist")]
@@ -121,7 +120,8 @@ pub mod std_mod {
     use super::*;
     use std::{
         fs::{self, File, OpenOptions},
-        io::{BufReader, Read, Seek, SeekFrom, Write}, path::Path,
+        io::{BufReader, Read, Seek, SeekFrom, Write},
+        path::Path,
     };
 
     #[derive(Default)]
@@ -642,7 +642,7 @@ mod tests {
             }
             assert_eq!(
                 error.to_string(),
-                format!("filestore error: {}", byte_conv_error)
+                format!("byte conversion: {}", byte_conv_error)
             );
         } else {
             panic!("unexpected error");
@@ -765,7 +765,7 @@ mod tests {
         if let FilestoreError::ChecksumTypeNotImplemented(cksum_type) = error {
             assert_eq!(
                 error.to_string(),
-                format!("checksum {:?} not implemented", cksum_type)
+                format!("checksum type not implemented: {:?}", cksum_type)
             );
         } else {
             panic!("unexpected error");
