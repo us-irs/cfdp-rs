@@ -55,7 +55,6 @@ use spacepackets::{
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
-use thiserror::Error;
 
 #[derive(Debug)]
 struct FileProperties {
@@ -189,7 +188,7 @@ impl<CheckTimer: CountdownProvider> TransactionParams<CheckTimer> {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum DestError {
     /// File directive expected, but none specified
     #[error("expected file directive")]
@@ -215,6 +214,7 @@ pub enum DestError {
     #[error("pdu error {0}")]
     Pdu(#[from] PduError),
     #[error("io error {0}")]
+    #[cfg(feature = "std")]
     Io(#[from] std::io::Error),
     #[error("file store error {0}")]
     Filestore(#[from] FilestoreError),

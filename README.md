@@ -14,14 +14,13 @@ The underlying base packet library used to generate the packets to be sent is th
 # Features
 
 The goal of this library is to be flexible enough to support the use-cases of both on-board
-software and of ground software. It has support to make integration on [std] systems as simple
-as possible, but also has sufficient abstraction to allow for integration on`no_std` environments.
-Currently, the handlers still require the [std] feature until
-[thiserror supports `error_in_core`](https://github.com/dtolnay/thiserror/pull/304).
+software and of ground software. It has support to make integration on `std` systems as simple
+as possible, but also has sufficient abstraction to allow for integration on`no_std` environments
+and can be used on these systems as well as long as the `alloc` feature is activated.
 
-It is recommended to activate the `alloc` feature at the very least to allow using the primary
-components provided by this crate. These components will only allocate memory at initialization
-time and thus are still viable for systems where run-time allocation is prohibited.
+Please note even though the `alloc` feature is required for the core handlers, these components
+will only allocate memory at initialization time and thus are still viable for systems where
+run-time allocation is prohibited.
 
 ## Default features
 
