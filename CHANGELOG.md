@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 # [unreleased]
 
+# [v0.2.0] 2024-11-26
+
 - Bumped `thiserror` to v2
 - Bumped `spacepackets` to v0.13
 - The source and destination handlers can now be used without the `std` feature and only require
