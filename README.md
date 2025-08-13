@@ -32,9 +32,9 @@ software and of ground software. It has support to make integration on `std` sys
 as possible, but also has sufficient abstraction to allow for integration on`no_std` environments
 and can be used on these systems as well as long as the `alloc` feature is activated.
 
-Please note even though the `alloc` feature is required for the core handlers, these components
-will only allocate memory at initialization time and thus are still viable for systems where
-run-time allocation is prohibited.
+Please note that even though the `alloc` feature is required for the core handlers, these
+components will only allocate memory at initialization time and thus are still viable for systems
+where run-time allocation is prohibited.
 
 ### Default features
 
