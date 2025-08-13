@@ -13,18 +13,32 @@ The underlying base packet library used to generate the packets to be sent is th
 
 # Features
 
+`cfdp-rs` currently supports following features:
+
+- Unacknowledged (class 1) file transfers for both source and destination side.
+
+The following features have not been implemented yet. PRs or notifications for demand are welcome!
+
+- Acknowledged (class 2) file transfers for both source and destination side.
+- Suspending transfers
+- Inactivity handling
+- Start and end of transmission and reception opportunity handling
+- Keep Alive and Prompt PDU handling
+
+## Rust features
+
 `cfdp-rs` supports various runtime environments and is also suitable for `no_std` environments.
 It is recommended to activate the `alloc` feature at the very least to allow using the primary
 components provided by this crate. These components will only allocate memory at initialization
 time and thus are still viable for systems where run-time allocation is prohibited.
 
-## Default features
+### Default features
 
  - [`std`](https://doc.rust-lang.org/std/): Enables functionality relying on the standard library.
  - [`alloc`](https://doc.rust-lang.org/alloc/): Enables features which require allocation support.
    Enabled by the `std` feature.
 
-## Optional Features
+### Optional Features
 
  - [`serde`](https://serde.rs/): Adds `serde` support for most types by adding `Serialize` and `Deserialize` `derive`s
  - [`defmt`](https://defmt.ferrous-systems.com/): Add support for the `defmt` by adding the
