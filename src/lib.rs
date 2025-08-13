@@ -1,5 +1,23 @@
-//! This module contains the implementation of the CCSDS File Delivery Protocol (CFDP) high level
-//! abstractions as specified in CCSDS 727.0-B-5.
+//! # `cfdp` - High-level support for implementing CFDP
+//!
+//! This is a high-level support library for implementing the CCSDS File Delivery Protocol
+//! according to the CCSDS 727.0-B-5 standard.
+//!
+//! # Features
+//!
+//! The crate currently supports following features:
+//!
+//! - Unacknowledged (class 1) file transfers for both source and destination side.
+//!
+//! The following features have not been implemented yet. PRs or notifications for demand are welcome!
+//!
+//! - Acknowledged (class 2) file transfers for both source and destination side.
+//! - Suspending transfers
+//! - Inactivity handling
+//! - Start and end of transmission and reception opportunity handling
+//! - Keep Alive and Prompt PDU handling
+//!
+//! # Overview
 //!
 //! The basic idea of CFDP is to convert files of any size into a stream of packets called packet
 //! data units (PDU). CFPD has an unacknowledged and acknowledged mode, with the option to request
@@ -169,7 +187,7 @@ pub trait TimerCreatorProvider {
 
 /// This structure models the remote entity configuration information as specified in chapter 8.3
 /// of the CFDP standard.
-
+///
 /// Some of the fields which were not considered necessary for the Rust implementation
 /// were omitted. Some other fields which are not contained inside the standard but are considered
 /// necessary for the Rust implementation are included.
@@ -195,16 +213,16 @@ pub trait TimerCreatorProvider {
 ///
 /// * `entity_id` - The ID of the remote entity.
 /// * `max_packet_len` - This determines of all PDUs generated for that remote entity in addition
-///    to the `max_file_segment_len` attribute which also determines the size of file data PDUs.
+///   to the `max_file_segment_len` attribute which also determines the size of file data PDUs.
 /// * `max_file_segment_len` The maximum file segment length which determines the maximum size
 ///   of file data PDUs in addition to the `max_packet_len` attribute. If this field is set
 ///   to None, the maximum file segment length will be derived from the maximum packet length.
 ///   If this has some value which is smaller than the segment value derived from
 ///   `max_packet_len`, this value will be picked.
 /// * `closure_requested_by_default` - If the closure requested field is not supplied as part of
-///    the Put Request, it will be determined from this field in the remote configuration.
+///   the Put Request, it will be determined from this field in the remote configuration.
 /// * `crc_on_transmission_by_default` - If the CRC option is not supplied as part of the Put
-///    Request, it will be determined from this field in the remote configuration.
+///   Request, it will be determined from this field in the remote configuration.
 /// * `default_transmission_mode` - If the transmission mode is not supplied as part of the
 ///   Put Request, it will be determined from this field in the remote configuration.
 /// * `disposition_on_cancellation` - Determines whether an incomplete received file is discard on
@@ -216,16 +234,16 @@ pub trait TimerCreatorProvider {
 ///   reception of file data PDUs and EOF PDUs. Also see 4.6.3.3 of the CFDP standard. Defaults to
 ///   2, so the check limit timer may expire twice.
 /// * `positive_ack_timer_interval_seconds`- See the notes on the Positive Acknowledgment
-///    Procedures inside the class documentation. Expected as floating point seconds. Defaults to
-///    10 seconds.
+///   Procedures inside the class documentation. Expected as floating point seconds. Defaults to
+///   10 seconds.
 /// * `positive_ack_timer_expiration_limit` - See the notes on the Positive Acknowledgment
-///    Procedures inside the class documentation. Defaults to 2, so the timer may expire twice.
+///   Procedures inside the class documentation. Defaults to 2, so the timer may expire twice.
 /// * `immediate_nak_mode` - Specifies whether a NAK sequence should be issued immediately when a
-///    file data gap or lost metadata is detected in the acknowledged mode. Defaults to True.
+///   file data gap or lost metadata is detected in the acknowledged mode. Defaults to True.
 /// * `nak_timer_interval_seconds` -  See the notes on the Deferred Lost Segment Procedure inside
-///    the class documentation. Expected as floating point seconds. Defaults to 10 seconds.
+///   the class documentation. Expected as floating point seconds. Defaults to 10 seconds.
 /// * `nak_timer_expiration_limit` - See the notes on the Deferred Lost Segment Procedure inside
-///    the class documentation. Defaults to 2, so the timer may expire two times.
+///   the class documentation. Defaults to 2, so the timer may expire two times.
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

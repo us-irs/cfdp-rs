@@ -19,26 +19,11 @@ name = "cfdp"
 crc = "3"
 smallvec = "1"
 derive-new = ">=0.6, <=0.7"
-
-[dependencies.spacepackets]
-version = "0.13"
-default-features = false
-
-[dependencies.thiserror]
-version = "2"
-default-features = false
-
-[dependencies.hashbrown]
-version = ">=0.14, <=0.15"
-optional = true
-
-[dependencies.serde]
-version = "1"
-optional = true
-
-[dependencies.defmt]
-version = "0.3"
-optional = true
+hashbrown = { version = ">=0.14, <=0.15", optional = true }
+spacepackets = { version = "0.15", default-features = false }
+thiserror = { version = "2", default-features = false }
+serde = { version = "1", optional = true }
+defmt  = { version = "1", optional = true }
 
 [features]
 default = ["std"]
@@ -56,7 +41,7 @@ defmt = ["dep:defmt", "spacepackets/defmt"]
 
 [dev-dependencies]
 tempfile = "3"
-rand = "0.8"
+rand = "0.9"
 log = "0.4"
 fern = "0.7"
 chrono = "0.4"

@@ -92,6 +92,7 @@ struct TransferState<Countdown: CountdownProvider> {
     transaction_id: Option<TransactionId>,
     metadata_params: MetadataGenericParams,
     progress: u64,
+    // TODO: Can we delete this for good?
     // file_size_eof: u64,
     metadata_only: bool,
     condition_code: ConditionCode,
@@ -298,19 +299,19 @@ impl<
     ///
     /// * `local_cfg` - The local CFDP entity configuration.
     /// * `max_packet_len` - The maximum expected generated packet size in bytes. Each time a
-    ///    packet is sent, it will be buffered inside an internal buffer. The length of this buffer
-    ///    will be determined by this parameter. This parameter can either be a known upper bound,
-    ///    or it can specifically be determined by the largest packet size parameter of all remote
-    ///    entity configurations in the passed `remote_cfg_table`.
+    ///   packet is sent, it will be buffered inside an internal buffer. The length of this buffer
+    ///   will be determined by this parameter. This parameter can either be a known upper bound,
+    ///   or it can specifically be determined by the largest packet size parameter of all remote
+    ///   entity configurations in the passed `remote_cfg_table`.
     /// * `pdu_sender` - [PduSendProvider] used to send generated PDU packets.
     /// * `vfs` - [VirtualFilestore] implementation used by the handler, which decouples the CFDP
-    ///    implementation from the underlying filestore/filesystem. This allows to use this handler
-    ///    for embedded systems where a standard runtime might not be available.
+    ///   implementation from the underlying filestore/filesystem. This allows to use this handler
+    ///   for embedded systems where a standard runtime might not be available.
     /// * `remote_cfg_table` - The [RemoteEntityConfigProvider] used to look up remote
-    ///    entities and target specific configuration for file copy operations.
+    ///   entities and target specific configuration for file copy operations.
     /// * `check_timer_creator` - [TimerCreatorProvider] used by the CFDP handler to generate
-    ///    timers required by various tasks. This allows to use this handler for embedded systems
-    ///    where the standard time APIs might not be available.
+    ///   timers required by various tasks. This allows to use this handler for embedded systems
+    ///   where the standard time APIs might not be available.
     pub fn new(
         local_cfg: LocalEntityConfig<UserFaultHook>,
         max_packet_len: usize,
@@ -1429,7 +1430,7 @@ mod tests {
 
     #[test]
     fn test_segmented_file_transfer_not_acked() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut random_data = [0u8; 512];
         rng.fill(&mut random_data);
         let file_size = random_data.len() as u64;
@@ -1456,7 +1457,7 @@ mod tests {
 
     #[test]
     fn test_check_limit_handling_transfer_success() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut random_data = [0u8; 512];
         rng.fill(&mut random_data);
         let file_size = random_data.len() as u64;
@@ -1502,7 +1503,7 @@ mod tests {
 
     #[test]
     fn test_check_limit_handling_limit_reached() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut random_data = [0u8; 512];
         rng.fill(&mut random_data);
         let file_size = random_data.len() as u64;
@@ -1752,7 +1753,7 @@ mod tests {
         let fault_handler = TestFaultHandler::default();
         let src_path = tempfile::TempPath::from_path("/tmp/test.txt").to_path_buf();
         let dest_path = tempfile::TempDir::new().unwrap();
-        let mut dest_path_buf = dest_path.into_path();
+        let mut dest_path_buf = dest_path.keep();
         let mut tb = DestHandlerTestbench::new(
             fault_handler,
             false,
