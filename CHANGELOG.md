@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 # [unreleased]
 
+- Bumped `spacepackets` to v0.15
+- Bumped `defmt` to v1
+
 # [v0.2.0] 2024-11-26
 
 - Bumped `thiserror` to v2

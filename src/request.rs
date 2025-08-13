@@ -24,10 +24,10 @@ pub trait ReadablePutRequest {
     fn closure_requested(&self) -> Option<bool>;
     fn seg_ctrl(&self) -> Option<SegmentationControl>;
 
-    fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv>>;
-    fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv>>;
-    fn flow_label(&self) -> Option<Tlv>;
-    fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv>>;
+    fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv<'_>>>;
+    fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv<'_>>>;
+    fn flow_label(&self) -> Option<Tlv<'_>>;
+    fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv<'_>>>;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -101,25 +101,25 @@ impl ReadablePutRequest for PutRequest<'_, '_, '_, '_, '_, '_> {
         self.seg_ctrl
     }
 
-    fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv>> {
+    fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv<'_>>> {
         if let Some(msgs_to_user) = self.msgs_to_user {
             return Some(msgs_to_user.iter().copied());
         }
         None
     }
 
-    fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv>> {
+    fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv<'_>>> {
         if let Some(fh_overrides) = self.fault_handler_overrides {
             return Some(fh_overrides.iter().copied());
         }
         None
     }
 
-    fn flow_label(&self) -> Option<Tlv> {
+    fn flow_label(&self) -> Option<Tlv<'_>> {
         self.flow_label
     }
 
-    fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv>> {
+    fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv<'_>>> {
         if let Some(fs_requests) = self.msgs_to_user {
             return Some(fs_requests.iter().copied());
         }
@@ -370,25 +370,25 @@ pub mod alloc_mod {
             self.seg_ctrl
         }
 
-        fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv>> {
+        fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv<'_>>> {
             if let Some(msgs_to_user) = &self.msgs_to_user {
                 return Some(msgs_to_user.iter().map(|tlv_owned| tlv_owned.as_tlv()));
             }
             None
         }
 
-        fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv>> {
+        fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv<'_>>> {
             if let Some(fh_overrides) = &self.fault_handler_overrides {
                 return Some(fh_overrides.iter().map(|tlv_owned| tlv_owned.as_tlv()));
             }
             None
         }
 
-        fn flow_label(&self) -> Option<Tlv> {
+        fn flow_label(&self) -> Option<Tlv<'_>> {
             self.flow_label.as_ref().map(|tlv| tlv.as_tlv())
         }
 
-        fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv>> {
+        fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv<'_>>> {
             if let Some(requests) = &self.fs_requests {
                 return Some(requests.iter().map(|tlv_owned| tlv_owned.as_tlv()));
             }
