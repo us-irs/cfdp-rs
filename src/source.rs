@@ -207,8 +207,7 @@ struct PositiveAckParams<Countdown: CountdownProvider> {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct ErrorAndAnomlyTracker {
-    unexpected_ack_pdu: u8,
+pub struct AnomlyTracker {
     invalid_ack_directive_code: u8,
 }
 
@@ -265,7 +264,7 @@ pub struct SourceHandler<
     positive_ack_params: RefCell<Option<PositiveAckParams<Countdown>>>,
     timer_creator: TimerCreator,
     seq_count_provider: SeqCountProvider,
-    anomalies: ErrorAndAnomlyTracker,
+    anomalies: AnomlyTracker,
 }
 
 impl<
@@ -444,7 +443,7 @@ impl<
             FileDirectiveType::KeepAlivePdu => self.handle_keep_alive_pdu(),
             FileDirectiveType::AckPdu => {
                 let ack_pdu = AckPdu::from_bytes(packet_to_insert.pdu())?;
-                self.handle_ack_pdu(&ack_pdu)
+                self.handle_ack_pdu(&ack_pdu)?
             }
             FileDirectiveType::EofPdu
             | FileDirectiveType::PromptPdu
@@ -1032,11 +1031,13 @@ impl<
         Ok(())
     }
 
-    fn handle_ack_pdu(&mut self, ack_pdu: &AckPdu) {
+    fn handle_ack_pdu(&mut self, ack_pdu: &AckPdu) -> Result<(), SourceError> {
         if self.step() != TransactionStep::WaitingForEofAck {
             // Drop the packet, wrong state to handle it..
-            self.anomalies.unexpected_ack_pdu = self.anomalies.unexpected_ack_pdu.wrapping_add(1);
-            return;
+            return Err(SourceError::UnexpectedPdu {
+                pdu_type: PduType::FileDirective,
+                directive_type: Some(FileDirectiveType::AckPdu),
+            });
         }
         if ack_pdu.directive_code_of_acked_pdu() == FileDirectiveType::EofPdu {
             self.set_step(TransactionStep::WaitingForFinished);
@@ -1044,6 +1045,7 @@ impl<
             self.anomalies.invalid_ack_directive_code =
                 self.anomalies.invalid_ack_directive_code.wrapping_add(1);
         }
+        Ok(())
     }
 
     fn handle_keep_alive_pdu(&mut self) {}
