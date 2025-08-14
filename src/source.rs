@@ -36,41 +36,42 @@
 //! 6. A finished PDU ACK packet will be generated to be sent to the remote CFDP entity.
 //!    The [spacepackets::cfdp::pdu::finished::FinishedPduReader] can be used to inspect the
 //!    generated PDU.
-use core::{cell::RefCell, ops::ControlFlow, str::Utf8Error};
+use core::{cell::RefCell, ops::ControlFlow, str::Utf8Error, time::Duration};
 
 use spacepackets::{
+    ByteConversionError,
     cfdp::{
+        ConditionCode, Direction, LargeFileFlag, PduType, SegmentMetadataFlag, SegmentationControl,
+        TransmissionMode,
         lv::Lv,
         pdu::{
+            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
+            ack::AckPdu,
             eof::EofPdu,
             file_data::{
-                calculate_max_file_seg_len_for_max_packet_len_and_pdu_header,
                 FileDataPduCreatorWithReservedDatafield,
+                calculate_max_file_seg_len_for_max_packet_len_and_pdu_header,
             },
             finished::{DeliveryCode, FileStatus, FinishedPduReader},
             metadata::{MetadataGenericParams, MetadataPduCreator},
-            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
         },
-        ConditionCode, Direction, LargeFileFlag, PduType, SegmentMetadataFlag, SegmentationControl,
-        TransmissionMode,
     },
     util::{UnsignedByteField, UnsignedEnum},
-    ByteConversionError,
 };
 
 use spacepackets::seq_count::SequenceCountProvider;
 
 use crate::{
-    time::CountdownProvider, DummyPduProvider, EntityType, GenericSendError, PduProvider,
-    TimerCreatorProvider,
+    DummyPduProvider, EntityType, GenericSendError, PduProvider, TimerCreatorProvider,
+    time::CountdownProvider,
 };
 
 use super::{
+    LocalEntityConfig, PacketTarget, PduSendProvider, RemoteEntityConfig,
+    RemoteEntityConfigProvider, State, TransactionId, UserFaultHookProvider,
     filestore::{FilestoreError, VirtualFilestore},
     request::{ReadablePutRequest, StaticPutRequestCacher},
     user::{CfdpUser, TransactionFinishedParams},
-    LocalEntityConfig, PacketTarget, PduSendProvider, RemoteEntityConfig,
-    RemoteEntityConfigProvider, State, TransactionId, UserFaultHookProvider,
 };
 
 /// This enumeration models the different transaction steps of the source entity handler.
@@ -87,11 +88,11 @@ pub enum TransactionStep {
     SendingEof = 6,
     WaitingForEofAck = 7,
     WaitingForFinished = 8,
-    // SendingAckOfFinished = 9,
+    SendingAckOfFinished = 9,
     NoticeOfCompletion = 10,
 }
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 pub struct FileParams {
     pub progress: u64,
     pub segment_len: u64,
@@ -107,7 +108,7 @@ pub struct StateHelper {
     num_packets_ready: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct FinishedParams {
     condition_code: ConditionCode,
     delivery_code: DeliveryCode,
@@ -180,6 +181,18 @@ pub enum PutRequestError {
     FilestoreError(#[from] FilestoreError),
 }
 
+#[derive(Debug)]
+struct PositiveAckParams<Countdown: CountdownProvider> {
+    ack_timer: Countdown,
+    ack_counter: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ErrorAndAnomlyTracker {
+    unexpected_ack_pdu: u8,
+    invalid_ack_directive_code: u8,
+}
+
 /// This is the primary CFDP source handler. It models the CFDP source entity, which is
 /// primarily responsible for handling put requests to send files to another CFDP destination
 /// entity.
@@ -222,27 +235,29 @@ pub struct SourceHandler<
     put_request_cacher: StaticPutRequestCacher,
     remote_cfg_table: RemoteCfgTable,
     vfs: Vfs,
-    state_helper: StateHelper,
+    state_helper: RefCell<StateHelper>,
     // Transfer related state information
-    tstate: Option<TransferState>,
+    tstate: RefCell<Option<TransferState>>,
     // File specific transfer fields
-    fparams: FileParams,
+    fparams: RefCell<FileParams>,
     // PDU configuration is cached so it can be re-used for all PDUs generated for file transfers.
     pdu_conf: CommonPduConfig,
-    countdown: Option<Countdown>,
+    countdown: RefCell<Option<Countdown>>,
+    positive_ack_params: RefCell<Option<PositiveAckParams<Countdown>>>,
     timer_creator: TimerCreator,
     seq_count_provider: SeqCountProvider,
+    anomalies: ErrorAndAnomlyTracker,
 }
 
 impl<
-        PduSender: PduSendProvider,
-        UserFaultHook: UserFaultHookProvider,
-        Vfs: VirtualFilestore,
-        RemoteCfgTable: RemoteEntityConfigProvider,
-        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
-        Countdown: CountdownProvider,
-        SeqCountProvider: SequenceCountProvider,
-    >
+    PduSender: PduSendProvider,
+    UserFaultHook: UserFaultHookProvider,
+    Vfs: VirtualFilestore,
+    RemoteCfgTable: RemoteEntityConfigProvider,
+    TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+    Countdown: CountdownProvider,
+    SeqCountProvider: SequenceCountProvider,
+>
     SourceHandler<
         PduSender,
         UserFaultHook,
@@ -297,7 +312,9 @@ impl<
             tstate: Default::default(),
             fparams: Default::default(),
             pdu_conf: Default::default(),
-            countdown: None,
+            anomalies: Default::default(),
+            countdown: RefCell::new(None),
+            positive_ack_params: RefCell::new(None),
             timer_creator,
             seq_count_provider,
         }
@@ -327,7 +344,7 @@ impl<
         if let Some(packet) = pdu {
             self.insert_packet(cfdp_user, packet)?;
         }
-        match self.state_helper.state {
+        match self.state() {
             super::State::Idle => {
                 // TODO: In acknowledged mode, add timer handling.
                 Ok(0)
@@ -338,6 +355,34 @@ impl<
                 Ok(0)
             }
         }
+    }
+
+    #[inline]
+    pub fn transaction_id(&self) -> Option<TransactionId> {
+        self.tstate.borrow().as_ref().map(|v| v.transaction_id)
+    }
+
+    /// Returns the [TransmissionMode] for the active file operation.
+    #[inline]
+    pub fn transmission_mode(&self) -> Option<super::TransmissionMode> {
+        self.tstate.borrow().as_ref().map(|v| v.transmission_mode)
+    }
+
+    /// Get the [TransactionStep], which denotes the exact step of a pending CFDP transaction when
+    /// applicable.
+    #[inline]
+    pub fn step(&self) -> TransactionStep {
+        self.state_helper.borrow().step
+    }
+
+    #[inline]
+    pub fn state(&self) -> State {
+        self.state_helper.borrow().state
+    }
+
+    #[inline]
+    pub fn local_cfg(&self) -> &LocalEntityConfig<UserFaultHook> {
+        &self.local_cfg
     }
 
     fn insert_packet(
@@ -367,10 +412,16 @@ impl<
             .file_directive_type()
             .expect("PDU directive type unexpectedly not set")
         {
-            FileDirectiveType::FinishedPdu => self.handle_finished_pdu(packet_to_insert)?,
+            FileDirectiveType::FinishedPdu => {
+                let finished_pdu = FinishedPduReader::new(packet_to_insert.pdu())?;
+                self.handle_finished_pdu(&finished_pdu)?
+            }
             FileDirectiveType::NakPdu => self.handle_nak_pdu(),
             FileDirectiveType::KeepAlivePdu => self.handle_keep_alive_pdu(),
-            FileDirectiveType::AckPdu => return Err(SourceError::NotImplemented),
+            FileDirectiveType::AckPdu => {
+                let ack_pdu = AckPdu::from_bytes(packet_to_insert.pdu())?;
+                self.handle_ack_pdu(&ack_pdu)
+            }
             FileDirectiveType::EofPdu
             | FileDirectiveType::PromptPdu
             | FileDirectiveType::MetadataPdu => {
@@ -394,7 +445,7 @@ impl<
         &mut self,
         put_request: &impl ReadablePutRequest,
     ) -> Result<(), PutRequestError> {
-        if self.state_helper.state != super::State::Idle {
+        if self.state() != super::State::Idle {
             return Err(PutRequestError::AlreadyBusy);
         }
         self.put_request_cacher.set(put_request)?;
@@ -410,7 +461,7 @@ impl<
             ));
         }
         let remote_cfg = remote_cfg.unwrap();
-        self.state_helper.num_packets_ready = 0;
+        self.state_helper.get_mut().num_packets_ready = 0;
         let transmission_mode = if self.put_request_cacher.static_fields.trans_mode.is_some() {
             self.put_request_cacher.static_fields.trans_mode.unwrap()
         } else {
@@ -469,10 +520,10 @@ impl<
         self.pdu_conf.crc_flag = remote_cfg.crc_on_transmission_by_default.into();
         self.pdu_conf.transaction_seq_num = *transaction_id.seq_num();
         self.pdu_conf.trans_mode = transmission_mode;
-        self.fparams.segment_len = self.calculate_max_file_seg_len(remote_cfg);
+        self.fparams.get_mut().segment_len = self.calculate_max_file_seg_len(remote_cfg);
 
         // Set up the transfer context structure.
-        self.tstate = Some(TransferState {
+        *self.tstate.get_mut() = Some(TransferState {
             transaction_id,
             remote_cfg: *remote_cfg,
             transmission_mode,
@@ -480,7 +531,7 @@ impl<
             cond_code_eof: None,
             finished_params: None,
         });
-        self.state_helper.state = super::State::Busy;
+        self.state_helper.get_mut().state = super::State::Busy;
         Ok(())
     }
 
@@ -500,17 +551,28 @@ impl<
         user: &mut impl CfdpUser,
         transaction_id: &TransactionId,
     ) -> Result<bool, SourceError> {
-        if self.state_helper.state == super::State::Idle {
+        if self.state() == super::State::Idle {
             return Ok(false);
         }
         if let Some(active_id) = self.transaction_id() {
             if active_id == *transaction_id {
                 // Control flow result can be ignored here for the cancel request.
-                let _ = self.notice_of_cancellation(user, ConditionCode::CancelRequestReceived)?;
+                let _ = self
+                    .notice_of_cancellation_internal(user, ConditionCode::CancelRequestReceived)?;
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    #[inline]
+    fn set_step(&mut self, step: TransactionStep) {
+        self.state_helper.get_mut().step = step;
+    }
+
+    #[inline]
+    fn set_step_internal(&self, step: TransactionStep) {
+        self.state_helper.borrow_mut().step = step;
     }
 
     fn fsm_busy(
@@ -519,37 +581,73 @@ impl<
         pdu: Option<&impl PduProvider>,
     ) -> Result<u32, SourceError> {
         let mut sent_packets = 0;
-        if self.state_helper.step == TransactionStep::Idle {
-            self.state_helper.step = TransactionStep::TransactionStart;
+        if self.step() == TransactionStep::Idle {
+            self.set_step(TransactionStep::TransactionStart);
         }
-        if self.state_helper.step == TransactionStep::TransactionStart {
+        if self.step() == TransactionStep::TransactionStart {
             self.handle_transaction_start(user)?;
-            self.state_helper.step = TransactionStep::SendingMetadata;
+            self.set_step(TransactionStep::SendingMetadata);
         }
-        if self.state_helper.step == TransactionStep::SendingMetadata {
+        if self.step() == TransactionStep::SendingMetadata {
             self.prepare_and_send_metadata_pdu()?;
-            self.state_helper.step = TransactionStep::SendingFileData;
+            self.set_step(TransactionStep::SendingFileData);
             sent_packets += 1;
         }
-        if self.state_helper.step == TransactionStep::SendingFileData {
+        if self.step() == TransactionStep::SendingFileData {
             if let ControlFlow::Break(packets) = self.file_data_fsm()? {
                 sent_packets += packets;
                 // Exit for each file data PDU to allow flow control.
                 return Ok(sent_packets);
             }
         }
-        if self.state_helper.step == TransactionStep::SendingEof {
+        if self.step() == TransactionStep::SendingEof {
             self.eof_fsm(user)?;
             sent_packets += 1;
         }
-        if self.state_helper.step == TransactionStep::WaitingForFinished {
+        if self.step() == TransactionStep::WaitingForEofAck {
+            self.handle_waiting_for_ack_pdu(user);
+        }
+        if self.step() == TransactionStep::WaitingForFinished {
             self.handle_wait_for_finished_pdu(user, pdu)?;
         }
-        if self.state_helper.step == TransactionStep::NoticeOfCompletion {
+        if self.step() == TransactionStep::NoticeOfCompletion {
             self.notice_of_completion(user);
             self.reset();
         }
         Ok(sent_packets)
+    }
+
+    fn handle_waiting_for_ack_pdu(&mut self, user: &mut impl CfdpUser) {
+        if self.handle_retransmission() == ControlFlow::Break(()) {
+            return;
+        }
+        self.handle_positive_ack_procedures(user);
+    }
+
+    fn handle_positive_ack_procedures(&mut self, user: &mut impl CfdpUser) {
+        if let Some(positive_ack_params) = self.positive_ack_params.borrow_mut().as_mut() {
+            //let mut positive_ack_params = positive_ack_params.borrow_mut();
+            if positive_ack_params.ack_timer.has_expired() {
+                let ack_timer_exp_limit = self
+                    .tstate
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .remote_cfg
+                    .positive_ack_timer_expiration_limit;
+                if positive_ack_params.ack_counter + 1 >= ack_timer_exp_limit {
+                    // TODO: Is it a good idea to ignore this result?
+                    let _ = self.declare_fault(user, ConditionCode::PositiveAckLimitReached);
+                    return;
+                }
+            }
+            positive_ack_params.ack_timer.reset();
+            positive_ack_params.ack_counter += 1;
+        }
+    }
+
+    fn handle_retransmission(&mut self) -> ControlFlow<(), ()> {
+        ControlFlow::Continue(())
     }
 
     fn handle_wait_for_finished_pdu(
@@ -560,22 +658,22 @@ impl<
         if let Some(packet) = packet {
             if let Some(FileDirectiveType::FinishedPdu) = packet.file_directive_type() {
                 let finished_pdu = FinishedPduReader::new(packet.pdu())?;
-                self.tstate.as_mut().unwrap().finished_params = Some(FinishedParams {
+                self.tstate.borrow_mut().as_mut().unwrap().finished_params = Some(FinishedParams {
                     condition_code: finished_pdu.condition_code(),
                     delivery_code: finished_pdu.delivery_code(),
                     file_status: finished_pdu.file_status(),
                 });
                 if self.transmission_mode().unwrap() == TransmissionMode::Acknowledged {
                     // TODO: Ack packet handling
-                    self.state_helper.step = TransactionStep::NoticeOfCompletion;
+                    self.set_step(TransactionStep::NoticeOfCompletion);
                 } else {
-                    self.state_helper.step = TransactionStep::NoticeOfCompletion;
+                    self.set_step(TransactionStep::NoticeOfCompletion);
                 }
                 return Ok(());
             }
         }
         // If we reach this state, countdown is definitely valid instance.
-        if self.countdown.as_ref().unwrap().has_expired() {
+        if self.countdown.borrow().as_ref().unwrap().has_expired() {
             self.declare_fault(user, ConditionCode::CheckLimitReached)?;
         }
         /*
@@ -607,30 +705,36 @@ impl<
     }
 
     fn eof_fsm(&mut self, user: &mut impl CfdpUser) -> Result<(), SourceError> {
-        let tstate = self.tstate.as_ref().unwrap();
         let checksum = self.vfs.calculate_checksum(
             self.put_request_cacher.source_file().unwrap(),
-            tstate.remote_cfg.default_crc_type,
-            self.fparams.file_size,
+            self.tstate
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .remote_cfg
+                .default_crc_type,
+            self.fparams.borrow().file_size,
             self.pdu_and_cksum_buffer.get_mut(),
         )?;
         self.prepare_and_send_eof_pdu(user, checksum)?;
-        let tstate = self.tstate.as_ref().unwrap();
-        if tstate.transmission_mode == TransmissionMode::Unacknowledged {
+        if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
+            let tstate_ref = self.tstate.borrow();
+            let tstate = tstate_ref.as_ref().unwrap();
             if tstate.closure_requested {
-                self.countdown = Some(self.timer_creator.create_countdown(
+                *self.countdown.get_mut() = Some(self.timer_creator.create_countdown(
                     crate::TimerContext::CheckLimit {
                         local_id: self.local_cfg.id,
                         remote_id: tstate.remote_cfg.entity_id,
                         entity_type: EntityType::Sending,
                     },
                 ));
-                self.state_helper.step = TransactionStep::WaitingForFinished;
+                self.set_step_internal(TransactionStep::WaitingForFinished);
             } else {
-                self.state_helper.step = TransactionStep::NoticeOfCompletion;
+                self.set_step_internal(TransactionStep::NoticeOfCompletion);
             }
         } else {
             // TODO: Start positive ACK procedure.
+            self.start_positive_ack_procedure();
         }
         /*
         if self.cfg.indication_cfg.eof_sent_indication_required:
@@ -655,16 +759,31 @@ impl<
         Ok(())
     }
 
+    fn start_positive_ack_procedure(&mut self) {
+        self.set_step(TransactionStep::WaitingForEofAck);
+        *self.positive_ack_params.borrow_mut() = Some(PositiveAckParams {
+            ack_timer: self
+                .timer_creator
+                .create_countdown(crate::TimerContext::PositiveAck {
+                    expiry_time: Duration::from_secs(
+                        self.tstate
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .remote_cfg
+                            .positive_ack_timer_interval_seconds as u64,
+                    ),
+                }),
+            ack_counter: 0,
+        })
+    }
+
     fn handle_transaction_start(
         &mut self,
         cfdp_user: &mut impl CfdpUser,
     ) -> Result<(), SourceError> {
-        let tstate = self
-            .tstate
-            .as_ref()
-            .expect("transfer state unexpectedly empty");
         if !self.put_request_cacher.has_source_file() {
-            self.fparams.metadata_only = true;
+            self.fparams.get_mut().metadata_only = true;
         } else {
             let source_file = self
                 .put_request_cacher
@@ -679,31 +798,29 @@ impl<
             self.put_request_cacher
                 .dest_file()
                 .map_err(SourceError::DestFileNotValidUtf8)?;
-            self.fparams.file_size = self.vfs.file_size(source_file)?;
-            if self.fparams.file_size > u32::MAX as u64 {
+            self.fparams.get_mut().file_size = self.vfs.file_size(source_file)?;
+            if self.fparams.get_mut().file_size > u32::MAX as u64 {
                 self.pdu_conf.file_flag = LargeFileFlag::Large
             } else {
-                if self.fparams.file_size == 0 {
-                    self.fparams.empty_file = true;
+                if self.fparams.borrow().file_size == 0 {
+                    self.fparams.get_mut().empty_file = true;
                 }
                 self.pdu_conf.file_flag = LargeFileFlag::Normal
             }
         }
-        cfdp_user.transaction_indication(&tstate.transaction_id);
+        cfdp_user.transaction_indication(&self.transaction_id().unwrap());
         Ok(())
     }
 
     fn prepare_and_send_metadata_pdu(&mut self) -> Result<(), SourceError> {
-        let tstate = self
-            .tstate
-            .as_ref()
-            .expect("transfer state unexpectedly empty");
+        let tstate_ref = self.tstate.borrow();
+        let tstate = tstate_ref.as_ref().unwrap();
         let metadata_params = MetadataGenericParams::new(
             tstate.closure_requested,
             tstate.remote_cfg.default_crc_type,
-            self.fparams.file_size,
+            self.fparams.borrow().file_size,
         );
-        if self.fparams.metadata_only {
+        if self.fparams.borrow().metadata_only {
             let metadata_pdu = MetadataPduCreator::new(
                 PduHeader::new_no_file_data(self.pdu_conf, 0),
                 metadata_params,
@@ -727,42 +844,56 @@ impl<
         if self.transmission_mode().unwrap() == super::TransmissionMode::Acknowledged {
             // TODO: Handle re-transmission
         }
-        if !self.fparams.metadata_only
-            && self.fparams.progress < self.fparams.file_size
+        let fparams = *self.fparams.borrow();
+        if !fparams.metadata_only
+            && fparams.progress < fparams.file_size
             && self.send_progressing_file_data_pdu()?
         {
             return Ok(ControlFlow::Break(1));
         }
-        if self.fparams.empty_file || self.fparams.progress >= self.fparams.file_size {
+        if fparams.empty_file || fparams.progress >= fparams.file_size {
             // EOF is still expected.
-            self.state_helper.step = TransactionStep::SendingEof;
-            self.tstate.as_mut().unwrap().cond_code_eof = Some(ConditionCode::NoError);
-        } else if self.fparams.metadata_only {
+            self.set_step(TransactionStep::SendingEof);
+            self.tstate.borrow_mut().as_mut().unwrap().cond_code_eof = Some(ConditionCode::NoError);
+        } else if fparams.metadata_only {
             // Special case: Metadata Only, no EOF required.
-            if self.tstate.as_ref().unwrap().closure_requested {
-                self.state_helper.step = TransactionStep::WaitingForFinished;
+            if self.tstate.borrow().as_ref().unwrap().closure_requested {
+                self.set_step(TransactionStep::WaitingForFinished);
             } else {
-                self.state_helper.step = TransactionStep::NoticeOfCompletion;
+                self.set_step(TransactionStep::NoticeOfCompletion);
             }
         }
         Ok(ControlFlow::Continue(()))
     }
 
     fn notice_of_completion(&mut self, cfdp_user: &mut impl CfdpUser) {
-        let tstate = self.tstate.as_ref().unwrap();
         if self.local_cfg.indication_cfg.transaction_finished {
             // The first case happens for unacknowledged file copy operation with no closure.
-            let finished_params = if tstate.finished_params.is_none() {
+            let finished_params = if self
+                .tstate
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .finished_params
+                .is_none()
+            {
                 TransactionFinishedParams {
-                    id: tstate.transaction_id,
+                    id: self.transaction_id().unwrap(),
                     condition_code: ConditionCode::NoError,
                     delivery_code: DeliveryCode::Complete,
                     file_status: FileStatus::Unreported,
                 }
             } else {
-                let finished_params = tstate.finished_params.as_ref().unwrap();
+                let finished_params = *self
+                    .tstate
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .finished_params
+                    .as_ref()
+                    .unwrap();
                 TransactionFinishedParams {
-                    id: tstate.transaction_id,
+                    id: self.transaction_id().unwrap(),
                     condition_code: finished_params.condition_code,
                     delivery_code: finished_params.delivery_code,
                     file_status: finished_params.file_status,
@@ -788,16 +919,17 @@ impl<
     }
 
     fn send_progressing_file_data_pdu(&mut self) -> Result<bool, SourceError> {
+        let fparams = *self.fparams.borrow();
         // Should never be called, but use defensive programming here.
-        if self.fparams.progress >= self.fparams.file_size {
+        if fparams.progress >= fparams.file_size {
             return Ok(false);
         }
-        let read_len = if self.fparams.file_size < self.fparams.segment_len {
-            self.fparams.file_size
-        } else if self.fparams.progress + self.fparams.segment_len > self.fparams.file_size {
-            self.fparams.file_size - self.fparams.progress
+        let read_len = if fparams.file_size < fparams.segment_len {
+            fparams.file_size
+        } else if fparams.progress + fparams.segment_len > fparams.file_size {
+            fparams.file_size - fparams.progress
         } else {
-            self.fparams.segment_len
+            fparams.segment_len
         };
         let pdu_creator = FileDataPduCreatorWithReservedDatafield::new_no_seg_metadata(
             PduHeader::new_for_file_data(
@@ -806,14 +938,14 @@ impl<
                 SegmentMetadataFlag::NotPresent,
                 SegmentationControl::NoRecordBoundaryPreservation,
             ),
-            self.fparams.progress,
+            fparams.progress,
             read_len,
         );
         let mut unwritten_pdu =
             pdu_creator.write_to_bytes_partially(self.pdu_and_cksum_buffer.get_mut())?;
         self.vfs.read_data(
             self.put_request_cacher.source_file().unwrap(),
-            self.fparams.progress,
+            fparams.progress,
             read_len,
             unwritten_pdu.file_data_field_mut(),
         )?;
@@ -823,7 +955,7 @@ impl<
             None,
             &self.pdu_and_cksum_buffer.borrow()[0..written_len],
         )?;
-        self.fparams.progress += read_len;
+        self.fparams.get_mut().progress += read_len;
         /*
                 """Generic function to prepare a file data PDU. This function can also be used to
                 re-transmit file data PDUs of segments which were already sent."""
@@ -869,24 +1001,25 @@ impl<
     }
 
     fn prepare_and_send_eof_pdu(
-        &mut self,
+        &self,
         cfdp_user: &mut impl CfdpUser,
         checksum: u32,
     ) -> Result<(), SourceError> {
-        let tstate = self
-            .tstate
-            .as_ref()
-            .expect("transfer state unexpectedly empty");
         let eof_pdu = EofPdu::new(
             PduHeader::new_no_file_data(self.pdu_conf, 0),
-            tstate.cond_code_eof.unwrap_or(ConditionCode::NoError),
+            self.tstate
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .cond_code_eof
+                .unwrap_or(ConditionCode::NoError),
             checksum,
-            self.fparams.progress,
+            self.fparams.borrow().progress,
             None,
         );
         self.pdu_send_helper(&eof_pdu)?;
         if self.local_cfg.indication_cfg.eof_sent {
-            cfdp_user.eof_sent_indication(&tstate.transaction_id);
+            cfdp_user.eof_sent_indication(&self.transaction_id().unwrap());
         }
         Ok(())
     }
@@ -902,30 +1035,31 @@ impl<
         Ok(())
     }
 
-    fn handle_finished_pdu(&mut self, pdu_provider: &impl PduProvider) -> Result<(), SourceError> {
+    fn handle_finished_pdu(&mut self, finished_pdu: &FinishedPduReader) -> Result<(), SourceError> {
         // Ignore this packet when we are idle.
-        if self.state_helper.state == State::Idle {
+        if self.state() == State::Idle {
             return Ok(());
         }
-        if self.state_helper.step != TransactionStep::WaitingForFinished {
+        if self.step() != TransactionStep::WaitingForFinished {
             return Err(SourceError::UnexpectedPdu {
                 pdu_type: PduType::FileDirective,
                 directive_type: Some(FileDirectiveType::FinishedPdu),
             });
         }
-        let finished_pdu = FinishedPduReader::new(pdu_provider.pdu())?;
         // Unwrapping should be fine here, the transfer state is valid when we are not in IDLE
         // mode.
-        self.tstate.as_mut().unwrap().finished_params = Some(FinishedParams {
+        self.tstate.get_mut().as_mut().unwrap().finished_params = Some(FinishedParams {
             condition_code: finished_pdu.condition_code(),
             delivery_code: finished_pdu.delivery_code(),
             file_status: finished_pdu.file_status(),
         });
-        if self.tstate.as_ref().unwrap().transmission_mode == TransmissionMode::Acknowledged {
+        if self.tstate.borrow().as_ref().unwrap().transmission_mode
+            == TransmissionMode::Acknowledged
+        {
             // TODO: Send ACK packet here immediately and continue.
             //self.state_helper.step = TransactionStep::SendingAckOfFinished;
         }
-        self.state_helper.step = TransactionStep::NoticeOfCompletion;
+        self.set_step(TransactionStep::NoticeOfCompletion);
 
         /*
         if self.transmission_mode == TransmissionMode.ACKNOWLEDGED:
@@ -937,51 +1071,43 @@ impl<
         Ok(())
     }
 
-    fn handle_nak_pdu(&mut self) {}
+    fn handle_nak_pdu(&mut self) {
+        // TODO: Implement re-transmission handling.
+    }
+
+    fn handle_ack_pdu(&mut self, ack_pdu: &AckPdu) {
+        if self.step() != TransactionStep::WaitingForEofAck {
+            // Drop the packet, wrong state to handle it..
+            self.anomalies.unexpected_ack_pdu = self.anomalies.unexpected_ack_pdu.wrapping_add(1);
+            return;
+        }
+        if ack_pdu.directive_code_of_acked_pdu() == FileDirectiveType::EofPdu {
+            self.set_step(TransactionStep::WaitingForFinished);
+        } else {
+            self.anomalies.invalid_ack_directive_code =
+                self.anomalies.invalid_ack_directive_code.wrapping_add(1);
+        }
+    }
 
     fn handle_keep_alive_pdu(&mut self) {}
 
-    pub fn transaction_id(&self) -> Option<TransactionId> {
-        self.tstate.as_ref().map(|v| v.transaction_id)
-    }
-
-    /// Returns the [TransmissionMode] for the active file operation.
-    #[inline]
-    pub fn transmission_mode(&self) -> Option<super::TransmissionMode> {
-        self.tstate.as_ref().map(|v| v.transmission_mode)
-    }
-
-    /// Get the [TransactionStep], which denotes the exact step of a pending CFDP transaction when
-    /// applicable.
-    pub fn step(&self) -> TransactionStep {
-        self.state_helper.step
-    }
-
-    pub fn state(&self) -> State {
-        self.state_helper.state
-    }
-
-    pub fn local_cfg(&self) -> &LocalEntityConfig<UserFaultHook> {
-        &self.local_cfg
-    }
-
     fn declare_fault(
-        &mut self,
+        &self,
         user: &mut impl CfdpUser,
         cond: ConditionCode,
     ) -> Result<(), SourceError> {
         // Need to cache those in advance, because a notice of cancellation can reset the handler.
-        let transaction_id = self.tstate.as_ref().unwrap().transaction_id;
-        let progress = self.fparams.progress;
+        let transaction_id = self.transaction_id().unwrap();
+        let progress = self.fparams.borrow().progress;
         let fh = self.local_cfg.fault_handler.get_fault_handler(cond);
         match fh {
             spacepackets::cfdp::FaultHandlerCode::NoticeOfCancellation => {
-                if let ControlFlow::Break(_) = self.notice_of_cancellation(user, cond)? {
+                if let ControlFlow::Break(_) = self.notice_of_cancellation_internal(user, cond)? {
                     return Ok(());
                 }
             }
             spacepackets::cfdp::FaultHandlerCode::NoticeOfSuspension => {
-                self.notice_of_suspension();
+                self.notice_of_suspension_internal();
             }
             spacepackets::cfdp::FaultHandlerCode::IgnoreError => (),
             spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => self.abandon_transaction(),
@@ -992,53 +1118,73 @@ impl<
         Ok(())
     }
 
-    fn notice_of_cancellation(
+    pub fn notice_of_cancellation(
         &mut self,
         user: &mut impl CfdpUser,
         condition_code: ConditionCode,
     ) -> Result<ControlFlow<()>, SourceError> {
-        let transaction_id = self.tstate.as_ref().unwrap().transaction_id;
+        self.notice_of_cancellation_internal(user, condition_code)
+    }
+
+    fn notice_of_cancellation_internal(
+        &self,
+        user: &mut impl CfdpUser,
+        condition_code: ConditionCode,
+    ) -> Result<ControlFlow<()>, SourceError> {
+        let transaction_id = self.transaction_id().unwrap();
         // CFDP standard 4.11.2.2.3: Any fault declared in the course of transferring
         // the EOF (cancel) PDU must result in abandonment of the transaction.
-        if let Some(cond_code_eof) = self.tstate.as_ref().unwrap().cond_code_eof {
+        if let Some(cond_code_eof) = self.tstate.borrow().as_ref().unwrap().cond_code_eof {
             if cond_code_eof != ConditionCode::NoError {
                 // Still call the abandonment callback to ensure the fault is logged.
                 self.local_cfg
                     .fault_handler
                     .user_hook
-                    .get_mut()
-                    .abandoned_cb(transaction_id, cond_code_eof, self.fparams.progress);
+                    .borrow_mut()
+                    .abandoned_cb(
+                        transaction_id,
+                        cond_code_eof,
+                        self.fparams.borrow().progress,
+                    );
                 self.abandon_transaction();
                 return Ok(ControlFlow::Break(()));
             }
         }
 
-        let tstate = self.tstate.as_mut().unwrap();
-        tstate.cond_code_eof = Some(condition_code);
+        self.tstate.borrow_mut().as_mut().unwrap().cond_code_eof = Some(condition_code);
         // As specified in 4.11.2.2, prepare an EOF PDU to be sent to the remote entity. Supply
         // the checksum for the file copy progress sent so far.
         let checksum = self.vfs.calculate_checksum(
             self.put_request_cacher.source_file().unwrap(),
-            tstate.remote_cfg.default_crc_type,
-            self.fparams.progress,
-            self.pdu_and_cksum_buffer.get_mut(),
+            self.tstate
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .remote_cfg
+                .default_crc_type,
+            self.fparams.borrow().progress,
+            &mut self.pdu_and_cksum_buffer.borrow_mut(),
         )?;
         self.prepare_and_send_eof_pdu(user, checksum)?;
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
             // We are done.
-            self.reset();
+            self.reset_internal();
         } else {
-            self.state_helper.step = TransactionStep::WaitingForEofAck;
+            self.set_step_internal(TransactionStep::WaitingForEofAck);
         }
         Ok(ControlFlow::Continue(()))
     }
 
-    fn notice_of_suspension(&mut self) {}
+    pub fn notice_of_suspension(&mut self) {
+        self.notice_of_suspension_internal();
+    }
 
-    fn abandon_transaction(&mut self) {
+    fn notice_of_suspension_internal(&self) {}
+
+    fn abandon_transaction(&self) {
         // I guess an abandoned transaction just stops whatever the handler is doing and resets
         // it to a clean state.. The implementation for this is quite easy.
-        self.reset();
+        self.reset_internal();
     }
 
     /*
@@ -1072,10 +1218,14 @@ impl<
     /// Resetting the handler might interfere with these mechanisms and lead to unexpected
     /// behaviour.
     pub fn reset(&mut self) {
-        self.state_helper = Default::default();
-        self.tstate = None;
-        self.fparams = Default::default();
-        self.countdown = None;
+        self.reset_internal();
+    }
+
+    fn reset_internal(&self) {
+        *self.state_helper.borrow_mut() = Default::default();
+        *self.tstate.borrow_mut() = None;
+        *self.fparams.borrow_mut() = Default::default();
+        *self.countdown.borrow_mut() = None;
     }
 }
 
@@ -1088,10 +1238,10 @@ mod tests {
     use rand::Rng;
     use spacepackets::{
         cfdp::{
+            ChecksumType, CrcFlag,
             pdu::{
                 file_data::FileDataPdu, finished::FinishedPduCreator, metadata::MetadataPduReader,
             },
-            ChecksumType, CrcFlag,
         },
         util::UnsignedByteFieldU16,
     };
@@ -1099,12 +1249,12 @@ mod tests {
 
     use super::*;
     use crate::{
+        CRC_32, FaultHandler, IndicationConfig, PduRawWithInfo, StdCountdown,
+        StdRemoteEntityConfigProvider, StdTimerCreator,
         filestore::NativeFilestore,
         request::PutRequestOwned,
         source::TransactionStep,
-        tests::{basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler},
-        FaultHandler, IndicationConfig, PduRawWithInfo, StdCountdown,
-        StdRemoteEntityConfigProvider, StdTimerCreator, CRC_32,
+        tests::{SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler, basic_remote_cfg_table},
     };
     use spacepackets::seq_count::SeqCountProviderSimple;
 
@@ -1781,10 +1931,11 @@ mod tests {
         let fd_pdu = FileDataPdu::from_bytes(&next_packet.raw_pdu).unwrap();
         assert_eq!(fd_pdu.file_data(), &rand_data[0..first_chunk.len()]);
         let expected_id = tb.handler.transaction_id().unwrap();
-        assert!(tb
-            .handler
-            .cancel_request(&mut cfdp_user, &expected_id)
-            .expect("cancellation failed"));
+        assert!(
+            tb.handler
+                .cancel_request(&mut cfdp_user, &expected_id)
+                .expect("cancellation failed")
+        );
         assert_eq!(tb.handler.state(), State::Idle);
         assert_eq!(tb.handler.step(), TransactionStep::Idle);
         let next_packet = tb.get_next_sent_pdu().unwrap();

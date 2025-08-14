@@ -29,29 +29,29 @@
 //!  3. An EOF ACK PDU has been sent back to the remote side.
 //!  4. A Finished PDU has been sent back to the remote side.
 //!  5. A Finished PDU ACK was received.
-use crate::{user::TransactionFinishedParams, DummyPduProvider, GenericSendError, PduProvider};
-use core::str::{from_utf8, from_utf8_unchecked, Utf8Error};
+use crate::{DummyPduProvider, GenericSendError, PduProvider, user::TransactionFinishedParams};
+use core::str::{Utf8Error, from_utf8, from_utf8_unchecked};
 
 use super::{
-    filestore::{FilestoreError, NativeFilestore, VirtualFilestore},
-    user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams},
     CountdownProvider, EntityType, LocalEntityConfig, PacketTarget, PduSendProvider,
     RemoteEntityConfig, RemoteEntityConfigProvider, State, StdCountdown,
     StdRemoteEntityConfigProvider, StdTimerCreator, TimerContext, TimerCreatorProvider,
     TransactionId, UserFaultHookProvider,
+    filestore::{FilestoreError, NativeFilestore, VirtualFilestore},
+    user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams},
 };
 use smallvec::SmallVec;
 use spacepackets::{
     cfdp::{
+        ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
         pdu::{
+            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
             eof::EofPdu,
             file_data::FileDataPdu,
             finished::{DeliveryCode, FileStatus, FinishedPduCreator},
             metadata::{MetadataGenericParams, MetadataPduReader},
-            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
         },
-        tlv::{msg_to_user::MsgToUserTlv, EntityIdTlv, GenericTlv, ReadableTlv, TlvType},
-        ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
+        tlv::{EntityIdTlv, GenericTlv, ReadableTlv, TlvType, msg_to_user::MsgToUserTlv},
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
@@ -285,13 +285,13 @@ pub type StdDestinationHandler<PduSender, UserFaultHook> = DestinationHandler<
 >;
 
 impl<
-        PduSender: PduSendProvider,
-        UserFaultHook: UserFaultHookProvider,
-        Vfs: VirtualFilestore,
-        RemoteCfgTable: RemoteEntityConfigProvider,
-        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
-        Countdown: CountdownProvider,
-    > DestinationHandler<PduSender, UserFaultHook, Vfs, RemoteCfgTable, TimerCreator, Countdown>
+    PduSender: PduSendProvider,
+    UserFaultHook: UserFaultHookProvider,
+    Vfs: VirtualFilestore,
+    RemoteCfgTable: RemoteEntityConfigProvider,
+    TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+    Countdown: CountdownProvider,
+> DestinationHandler<PduSender, UserFaultHook, Vfs, RemoteCfgTable, TimerCreator, Countdown>
 {
     /// Constructs a new destination handler.
     ///
@@ -1003,21 +1003,21 @@ mod tests {
     use rand::Rng;
     use spacepackets::{
         cfdp::{
-            lv::Lv,
-            pdu::{finished::FinishedPduReader, metadata::MetadataPduCreator, WritablePduPacket},
             ChecksumType, TransmissionMode,
+            lv::Lv,
+            pdu::{WritablePduPacket, finished::FinishedPduReader, metadata::MetadataPduCreator},
         },
         util::{UbfU16, UnsignedByteFieldU8},
     };
 
     use crate::{
+        CRC_32, CountdownProvider, FaultHandler, IndicationConfig, PduRawWithInfo,
+        StdRemoteEntityConfigProvider, TimerCreatorProvider,
         filestore::NativeFilestore,
         tests::{
-            basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler,
-            LOCAL_ID, REMOTE_ID,
+            LOCAL_ID, REMOTE_ID, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler,
+            basic_remote_cfg_table,
         },
-        CountdownProvider, FaultHandler, IndicationConfig, PduRawWithInfo,
-        StdRemoteEntityConfigProvider, TimerCreatorProvider, CRC_32,
     };
 
     use super::*;
@@ -1374,12 +1374,14 @@ mod tests {
         let test_sender = TestCfdpSender::default();
         let dest_handler = default_dest_handler(fault_handler, test_sender, Arc::default());
         assert!(dest_handler.transmission_mode().is_none());
-        assert!(dest_handler
-            .local_cfg
-            .fault_handler
-            .user_hook
-            .borrow()
-            .all_queues_empty());
+        assert!(
+            dest_handler
+                .local_cfg
+                .fault_handler
+                .user_hook
+                .borrow()
+                .all_queues_empty()
+        );
         assert!(dest_handler.pdu_sender.queue_empty());
         assert_eq!(dest_handler.state(), State::Idle);
         assert_eq!(dest_handler.step(), TransactionStep::Idle);

@@ -2,12 +2,12 @@
 use spacepackets::cfdp::tlv::WritableTlv;
 use spacepackets::{
     cfdp::{
+        ConditionCode,
         pdu::{
             file_data::SegmentMetadata,
             finished::{DeliveryCode, FileStatus},
         },
         tlv::msg_to_user::MsgToUserTlv,
-        ConditionCode,
     },
     util::UnsignedByteField,
 };
