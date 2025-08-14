@@ -3,7 +3,7 @@ use std::{
     fs::OpenOptions,
     io::{self, ErrorKind, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket},
-    sync::mpsc,
+    sync::{atomic::AtomicBool, mpsc},
     thread,
     time::Duration,
 };
@@ -27,6 +27,8 @@ use spacepackets::{
     seq_count::SeqCountProviderSyncU16,
     util::{UnsignedByteFieldU16, UnsignedEnum},
 };
+
+static KILL_APP: AtomicBool = AtomicBool::new(false);
 
 const PYTHON_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(1);
 const RUST_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(2);
@@ -231,7 +233,7 @@ impl UdpServer {
                     Ok(None)
                 } else {
                     Err(e.into())
-                }
+                };
             }
         };
         let (_, from) = res;
@@ -411,6 +413,9 @@ fn main() {
                     .expect("put request failed");
             }
             loop {
+                if KILL_APP.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let mut next_delay = None;
                 let mut undelayed_call_count = 0;
                 let packet_info = match source_tc_rx.try_recv() {
@@ -453,6 +458,9 @@ fn main() {
             loop {
                 let mut next_delay = None;
                 let mut undelayed_call_count = 0;
+                if KILL_APP.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let packet_info = match dest_tc_rx.try_recv() {
                     Ok(pdu_with_info) => Some(pdu_with_info),
                     Err(e) => match e {
@@ -494,6 +502,9 @@ fn main() {
             info!("Starting UDP server on {}", remote_addr);
             loop {
                 loop {
+                    if KILL_APP.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                     match udp_server.try_recv_tc() {
                         Ok(result) => match result {
                             Some((pdu, _addr)) => {

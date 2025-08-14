@@ -2,19 +2,19 @@
 use std::{
     fs::OpenOptions,
     io::Write,
-    sync::{atomic::AtomicBool, mpsc, Arc},
+    sync::{Arc, atomic::AtomicBool, mpsc},
     thread,
     time::Duration,
 };
 
 use cfdp::{
+    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
+    StdTimerCreator, TransactionId, UserFaultHookProvider,
     dest::DestinationHandler,
     filestore::NativeFilestore,
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
-    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
-    StdTimerCreator, TransactionId, UserFaultHookProvider,
 };
 use spacepackets::{
     cfdp::{ChecksumType, ConditionCode, TransmissionMode},

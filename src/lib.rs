@@ -100,7 +100,7 @@ pub mod user;
 
 use crate::time::CountdownProvider;
 use core::{cell::RefCell, fmt::Debug, hash::Hash};
-use crc::{Crc, CRC_32_ISCSI, CRC_32_ISO_HDLC};
+use crc::{CRC_32_ISCSI, CRC_32_ISO_HDLC, Crc};
 
 #[cfg(feature = "alloc")]
 pub use alloc_mod::*;
@@ -109,8 +109,8 @@ use core::time::Duration;
 use serde::{Deserialize, Serialize};
 use spacepackets::{
     cfdp::{
-        pdu::{FileDirectiveType, PduError, PduHeader},
         ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
+        pdu::{FileDirectiveType, PduError, PduHeader},
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
@@ -941,11 +941,11 @@ impl PduProvider for PduRawWithInfo<'_> {
 #[cfg(feature = "alloc")]
 pub mod alloc_mod {
     use spacepackets::cfdp::{
-        pdu::{FileDirectiveType, PduError},
         PduType,
+        pdu::{FileDirectiveType, PduError},
     };
 
-    use crate::{determine_packet_target, PacketTarget, PduProvider, PduRawWithInfo};
+    use crate::{PacketTarget, PduProvider, PduRawWithInfo, determine_packet_target};
 
     #[derive(Debug, PartialEq, Eq, Clone)]
     pub struct PduOwnedWithInfo {
@@ -1008,16 +1008,16 @@ pub(crate) mod tests {
     use alloc::{collections::VecDeque, string::String, vec::Vec};
     use spacepackets::{
         cfdp::{
+            ChecksumType, ConditionCode, PduType, TransmissionMode,
             lv::Lv,
             pdu::{
+                CommonPduConfig, FileDirectiveType, PduHeader, WritablePduPacket,
                 eof::EofPdu,
                 file_data::FileDataPdu,
                 metadata::{MetadataGenericParams, MetadataPduCreator},
-                CommonPduConfig, FileDirectiveType, PduHeader, WritablePduPacket,
             },
-            ChecksumType, ConditionCode, PduType, TransmissionMode,
         },
-        util::{UnsignedByteField, UnsignedByteFieldU16, UnsignedByteFieldU8, UnsignedEnum},
+        util::{UnsignedByteField, UnsignedByteFieldU8, UnsignedByteFieldU16, UnsignedEnum},
     };
     use user::{CfdpUser, OwnedMetadataRecvdParams, TransactionFinishedParams};
 
