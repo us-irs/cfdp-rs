@@ -5,13 +5,14 @@
 //!
 //! # Features
 //!
-//! The crate currently supports following features:
+//! `cfdp-rs` currently supports following high-level features:
 //!
 //! - Unacknowledged (class 1) file transfers for both source and destination side.
+//! - Acknowledged (class 2) file transfers for the source side.
 //!
 //! The following features have not been implemented yet. PRs or notifications for demand are welcome!
 //!
-//! - Acknowledged (class 2) file transfers for both source and destination side.
+//! - Acknowledged (class 2) file transfers for the destination side.
 //! - Suspending transfers
 //! - Inactivity handling
 //! - Start and end of transmission and reception opportunity handling
@@ -100,7 +101,7 @@ pub mod user;
 
 use crate::time::CountdownProvider;
 use core::{cell::RefCell, fmt::Debug, hash::Hash};
-use crc::{Crc, CRC_32_ISCSI, CRC_32_ISO_HDLC};
+use crc::{CRC_32_ISCSI, CRC_32_ISO_HDLC, Crc};
 
 #[cfg(feature = "alloc")]
 pub use alloc_mod::*;
@@ -109,8 +110,8 @@ use core::time::Duration;
 use serde::{Deserialize, Serialize};
 use spacepackets::{
     cfdp::{
-        pdu::{FileDirectiveType, PduError, PduHeader},
         ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
+        pdu::{FileDirectiveType, PduError, PduHeader},
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
@@ -619,7 +620,6 @@ impl<UserFaultHook: UserFaultHookProvider> LocalEntityConfig<UserFaultHook> {
 }
 
 /// Generic error type for sending a PDU via a message queue.
-#[cfg(feature = "std")]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum GenericSendError {
@@ -631,7 +631,6 @@ pub enum GenericSendError {
     Other,
 }
 
-#[cfg(feature = "std")]
 pub trait PduSendProvider {
     fn send_pdu(
         &self,
@@ -846,40 +845,39 @@ pub fn determine_packet_target(raw_pdu: &[u8]) -> Result<PacketTarget, PduError>
             expected: None,
         }
     })?;
-    let packet_target =
-        match file_directive_type {
-            // Section c) of 4.5.3: These PDUs should always be targeted towards the file sender a.k.a.
-            // the source handler
-            FileDirectiveType::NakPdu
-            | FileDirectiveType::FinishedPdu
-            | FileDirectiveType::KeepAlivePdu => PacketTarget::SourceEntity,
-            // Section b) of 4.5.3: These PDUs should always be targeted towards the file receiver a.k.a.
-            // the destination handler
-            FileDirectiveType::MetadataPdu
-            | FileDirectiveType::EofPdu
-            | FileDirectiveType::PromptPdu => PacketTarget::DestEntity,
-            // Section a): Recipient depends of the type of PDU that is being acknowledged. We can simply
-            // extract the PDU type from the raw stream. If it is an EOF PDU, this packet is passed to
-            // the source handler, for a Finished PDU, it is passed to the destination handler.
-            FileDirectiveType::AckPdu => {
-                let acked_directive = FileDirectiveType::try_from(raw_pdu[header_len + 1])
-                    .map_err(|_| PduError::InvalidDirectiveType {
-                        found: raw_pdu[header_len],
-                        expected: None,
-                    })?;
-                if acked_directive == FileDirectiveType::EofPdu {
-                    PacketTarget::SourceEntity
-                } else if acked_directive == FileDirectiveType::FinishedPdu {
-                    PacketTarget::DestEntity
-                } else {
-                    // TODO: Maybe a better error? This might be confusing..
-                    return Err(PduError::InvalidDirectiveType {
-                        found: raw_pdu[header_len + 1],
-                        expected: None,
-                    });
-                }
+    let packet_target = match file_directive_type {
+        // Section c) of 4.5.3: These PDUs should always be targeted towards the file sender a.k.a.
+        // the source handler
+        FileDirectiveType::NakPdu
+        | FileDirectiveType::FinishedPdu
+        | FileDirectiveType::KeepAlivePdu => PacketTarget::SourceEntity,
+        // Section b) of 4.5.3: These PDUs should always be targeted towards the file receiver a.k.a.
+        // the destination handler
+        FileDirectiveType::MetadataPdu
+        | FileDirectiveType::EofPdu
+        | FileDirectiveType::PromptPdu => PacketTarget::DestEntity,
+        // Section a): Recipient depends of the type of PDU that is being acknowledged. We can simply
+        // extract the PDU type from the raw stream. If it is an EOF PDU, this packet is passed to
+        // the source handler, for a Finished PDU, it is passed to the destination handler.
+        FileDirectiveType::AckPdu => {
+            let acked_directive = FileDirectiveType::try_from(raw_pdu[header_len + 1] >> 4)
+                .map_err(|_| PduError::InvalidDirectiveType {
+                    found: (raw_pdu[header_len + 1] >> 4),
+                    expected: None,
+                })?;
+            if acked_directive == FileDirectiveType::EofPdu {
+                PacketTarget::SourceEntity
+            } else if acked_directive == FileDirectiveType::FinishedPdu {
+                PacketTarget::DestEntity
+            } else {
+                // TODO: Maybe a better error? This might be confusing..
+                return Err(PduError::InvalidDirectiveType {
+                    found: raw_pdu[header_len + 1],
+                    expected: None,
+                });
             }
-        };
+        }
+    };
     Ok(packet_target)
 }
 
@@ -941,11 +939,11 @@ impl PduProvider for PduRawWithInfo<'_> {
 #[cfg(feature = "alloc")]
 pub mod alloc_mod {
     use spacepackets::cfdp::{
-        pdu::{FileDirectiveType, PduError},
         PduType,
+        pdu::{FileDirectiveType, PduError},
     };
 
-    use crate::{determine_packet_target, PacketTarget, PduProvider, PduRawWithInfo};
+    use crate::{PacketTarget, PduProvider, PduRawWithInfo, determine_packet_target};
 
     #[derive(Debug, PartialEq, Eq, Clone)]
     pub struct PduOwnedWithInfo {
@@ -1003,21 +1001,25 @@ pub mod alloc_mod {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use core::cell::RefCell;
+    use core::{
+        cell::{Cell, RefCell},
+        sync::atomic::AtomicBool,
+    };
+    use std::{println, sync::Arc};
 
     use alloc::{collections::VecDeque, string::String, vec::Vec};
     use spacepackets::{
         cfdp::{
+            ChecksumType, ConditionCode, PduType, TransmissionMode,
             lv::Lv,
             pdu::{
+                CommonPduConfig, FileDirectiveType, PduHeader,
                 eof::EofPdu,
                 file_data::FileDataPdu,
                 metadata::{MetadataGenericParams, MetadataPduCreator},
-                CommonPduConfig, FileDirectiveType, PduHeader, WritablePduPacket,
             },
-            ChecksumType, ConditionCode, PduType, TransmissionMode,
         },
-        util::{UnsignedByteField, UnsignedByteFieldU16, UnsignedByteFieldU8, UnsignedEnum},
+        util::{UnsignedByteField, UnsignedByteFieldU8, UnsignedByteFieldU16, UnsignedEnum},
     };
     use user::{CfdpUser, OwnedMetadataRecvdParams, TransactionFinishedParams};
 
@@ -1027,6 +1029,111 @@ pub(crate) mod tests {
 
     pub const LOCAL_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(1);
     pub const REMOTE_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(2);
+
+    // This test structure allows to precisely control the expiry of CFDP timers.
+    #[derive(Debug, Default, Clone)]
+    pub(crate) struct TimerExpiryControl {
+        pub(crate) check_limit: Arc<AtomicBool>,
+        pub(crate) positive_ack: Arc<AtomicBool>,
+    }
+
+    impl TimerExpiryControl {
+        pub fn set_check_limit_expired(&mut self) {
+            self.check_limit
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+
+        #[allow(dead_code)]
+        pub fn set_positive_ack_expired(&mut self) {
+            self.positive_ack
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct TestCheckTimer {
+        counter: Cell<u32>,
+        context: TimerContext,
+        expiry_control: TimerExpiryControl,
+    }
+
+    impl CountdownProvider for TestCheckTimer {
+        fn has_expired(&self) -> bool {
+            match self.context {
+                TimerContext::CheckLimit {
+                    local_id: _,
+                    remote_id: _,
+                    entity_type: _,
+                } => self
+                    .expiry_control
+                    .check_limit
+                    .load(core::sync::atomic::Ordering::Acquire),
+                TimerContext::PositiveAck { expiry_time: _ } => self
+                    .expiry_control
+                    .positive_ack
+                    .load(core::sync::atomic::Ordering::Acquire),
+                TimerContext::NakActivity { expiry_time: _ } => todo!(),
+            }
+        }
+        fn reset(&mut self) {
+            match self.context {
+                TimerContext::CheckLimit {
+                    local_id: _,
+                    remote_id: _,
+                    entity_type: _,
+                } => self
+                    .expiry_control
+                    .check_limit
+                    .store(false, core::sync::atomic::Ordering::Release),
+                TimerContext::NakActivity { expiry_time: _ } => todo!(),
+                TimerContext::PositiveAck { expiry_time: _ } => self
+                    .expiry_control
+                    .positive_ack
+                    .store(false, core::sync::atomic::Ordering::Release),
+            }
+            self.counter.set(0);
+        }
+    }
+
+    impl TestCheckTimer {
+        pub fn new(context: TimerContext, expiry_control: &TimerExpiryControl) -> Self {
+            Self {
+                counter: Cell::new(0),
+                context,
+                expiry_control: expiry_control.clone(),
+            }
+        }
+    }
+
+    pub(crate) struct TestCheckTimerCreator {
+        expiry_control: TimerExpiryControl,
+    }
+
+    impl TestCheckTimerCreator {
+        pub fn new(expiry_control: &TimerExpiryControl) -> Self {
+            Self {
+                expiry_control: expiry_control.clone(),
+            }
+        }
+    }
+
+    impl TimerCreatorProvider for TestCheckTimerCreator {
+        type Countdown = TestCheckTimer;
+
+        fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
+            match timer_context {
+                TimerContext::CheckLimit { .. } => {
+                    TestCheckTimer::new(timer_context, &self.expiry_control)
+                }
+                TimerContext::PositiveAck { expiry_time: _ } => {
+                    TestCheckTimer::new(timer_context, &self.expiry_control)
+                }
+                _ => {
+                    panic!("invalid check timer creator, can only be used for check limit handling")
+                }
+            }
+        }
+    }
 
     pub struct FileSegmentRecvdParamsNoSegMetadata {
         #[allow(dead_code)]
@@ -1247,6 +1354,12 @@ pub(crate) mod tests {
             file_directive_type: Option<FileDirectiveType>,
             raw_pdu: &[u8],
         ) -> Result<(), GenericSendError> {
+            println!(
+                "sent pdu: {:?}, directive: {:?}, len: {}",
+                pdu_type,
+                file_directive_type,
+                raw_pdu.len()
+            );
             self.packet_queue.borrow_mut().push_back(SentPdu {
                 pdu_type,
                 file_directive_type,
@@ -1260,6 +1373,7 @@ pub(crate) mod tests {
         pub fn retrieve_next_pdu(&self) -> Option<SentPdu> {
             self.packet_queue.borrow_mut().pop_front()
         }
+
         pub fn queue_empty(&self) -> bool {
             self.packet_queue.borrow_mut().is_empty()
         }

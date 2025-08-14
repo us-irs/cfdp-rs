@@ -29,29 +29,28 @@
 //!  3. An EOF ACK PDU has been sent back to the remote side.
 //!  4. A Finished PDU has been sent back to the remote side.
 //!  5. A Finished PDU ACK was received.
-use crate::{user::TransactionFinishedParams, DummyPduProvider, GenericSendError, PduProvider};
-use core::str::{from_utf8, from_utf8_unchecked, Utf8Error};
+use crate::{DummyPduProvider, GenericSendError, PduProvider, user::TransactionFinishedParams};
+use core::str::{Utf8Error, from_utf8, from_utf8_unchecked};
 
 use super::{
-    filestore::{FilestoreError, NativeFilestore, VirtualFilestore},
-    user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams},
     CountdownProvider, EntityType, LocalEntityConfig, PacketTarget, PduSendProvider,
-    RemoteEntityConfig, RemoteEntityConfigProvider, State, StdCountdown,
-    StdRemoteEntityConfigProvider, StdTimerCreator, TimerContext, TimerCreatorProvider,
+    RemoteEntityConfig, RemoteEntityConfigProvider, State, TimerContext, TimerCreatorProvider,
     TransactionId, UserFaultHookProvider,
+    filestore::{FilestoreError, VirtualFilestore},
+    user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams},
 };
 use smallvec::SmallVec;
 use spacepackets::{
     cfdp::{
+        ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
         pdu::{
+            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader,
             eof::EofPdu,
             file_data::FileDataPdu,
             finished::{DeliveryCode, FileStatus, FinishedPduCreator},
             metadata::{MetadataGenericParams, MetadataPduReader},
-            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
         },
-        tlv::{msg_to_user::MsgToUserTlv, EntityIdTlv, GenericTlv, ReadableTlv, TlvType},
-        ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
+        tlv::{EntityIdTlv, GenericTlv, ReadableTlv, TlvType, msg_to_user::MsgToUserTlv},
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
@@ -278,20 +277,20 @@ pub struct DestinationHandler<
 pub type StdDestinationHandler<PduSender, UserFaultHook> = DestinationHandler<
     PduSender,
     UserFaultHook,
-    NativeFilestore,
-    StdRemoteEntityConfigProvider,
-    StdTimerCreator,
-    StdCountdown,
+    crate::filestore::NativeFilestore,
+    crate::StdRemoteEntityConfigProvider,
+    crate::StdTimerCreator,
+    crate::StdCountdown,
 >;
 
 impl<
-        PduSender: PduSendProvider,
-        UserFaultHook: UserFaultHookProvider,
-        Vfs: VirtualFilestore,
-        RemoteCfgTable: RemoteEntityConfigProvider,
-        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
-        Countdown: CountdownProvider,
-    > DestinationHandler<PduSender, UserFaultHook, Vfs, RemoteCfgTable, TimerCreator, Countdown>
+    PduSender: PduSendProvider,
+    UserFaultHook: UserFaultHookProvider,
+    Vfs: VirtualFilestore,
+    RemoteCfgTable: RemoteEntityConfigProvider,
+    TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+    Countdown: CountdownProvider,
+> DestinationHandler<PduSender, UserFaultHook, Vfs, RemoteCfgTable, TimerCreator, Countdown>
 {
     /// Constructs a new destination handler.
     ///
@@ -990,7 +989,6 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use core::{cell::Cell, sync::atomic::AtomicBool};
     #[allow(unused_imports)]
     use std::println;
     use std::{
@@ -999,79 +997,27 @@ mod tests {
         string::String,
     };
 
-    use alloc::{sync::Arc, vec::Vec};
+    use alloc::vec::Vec;
     use rand::Rng;
     use spacepackets::{
         cfdp::{
-            lv::Lv,
-            pdu::{finished::FinishedPduReader, metadata::MetadataPduCreator, WritablePduPacket},
             ChecksumType, TransmissionMode,
+            lv::Lv,
+            pdu::{WritablePduPacket, finished::FinishedPduReader, metadata::MetadataPduCreator},
         },
         util::{UbfU16, UnsignedByteFieldU8},
     };
 
     use crate::{
+        CRC_32, FaultHandler, IndicationConfig, PduRawWithInfo, StdRemoteEntityConfigProvider,
         filestore::NativeFilestore,
         tests::{
-            basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler,
-            LOCAL_ID, REMOTE_ID,
+            LOCAL_ID, REMOTE_ID, SentPdu, TestCfdpSender, TestCfdpUser, TestCheckTimer,
+            TestCheckTimerCreator, TestFaultHandler, TimerExpiryControl, basic_remote_cfg_table,
         },
-        CountdownProvider, FaultHandler, IndicationConfig, PduRawWithInfo,
-        StdRemoteEntityConfigProvider, TimerCreatorProvider, CRC_32,
     };
 
     use super::*;
-
-    #[derive(Debug)]
-    struct TestCheckTimer {
-        counter: Cell<u32>,
-        expired: Arc<AtomicBool>,
-    }
-
-    impl CountdownProvider for TestCheckTimer {
-        fn has_expired(&self) -> bool {
-            self.expired.load(core::sync::atomic::Ordering::Relaxed)
-        }
-        fn reset(&mut self) {
-            self.counter.set(0);
-        }
-    }
-
-    impl TestCheckTimer {
-        pub fn new(expired_flag: Arc<AtomicBool>) -> Self {
-            Self {
-                counter: Cell::new(0),
-                expired: expired_flag,
-            }
-        }
-    }
-
-    struct TestCheckTimerCreator {
-        check_limit_expired_flag: Arc<AtomicBool>,
-    }
-
-    impl TestCheckTimerCreator {
-        pub fn new(expired_flag: Arc<AtomicBool>) -> Self {
-            Self {
-                check_limit_expired_flag: expired_flag,
-            }
-        }
-    }
-
-    impl TimerCreatorProvider for TestCheckTimerCreator {
-        type Countdown = TestCheckTimer;
-
-        fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
-            match timer_context {
-                TimerContext::CheckLimit { .. } => {
-                    TestCheckTimer::new(self.check_limit_expired_flag.clone())
-                }
-                _ => {
-                    panic!("invalid check timer creator, can only be used for check limit handling")
-                }
-            }
-        }
-    }
 
     type TestDestHandler = DestinationHandler<
         TestCfdpSender,
@@ -1083,7 +1029,7 @@ mod tests {
     >;
 
     struct DestHandlerTestbench {
-        check_timer_expired: Arc<AtomicBool>,
+        expiry_control: TimerExpiryControl,
         handler: TestDestHandler,
         src_path: PathBuf,
         dest_path: PathBuf,
@@ -1110,12 +1056,11 @@ mod tests {
             src_path: PathBuf,
             dest_path: PathBuf,
         ) -> Self {
-            let check_timer_expired = Arc::new(AtomicBool::new(false));
+            let expiry_control = TimerExpiryControl::default();
             let test_sender = TestCfdpSender::default();
-            let dest_handler =
-                default_dest_handler(fault_handler, test_sender, check_timer_expired.clone());
+            let dest_handler = default_dest_handler(fault_handler, test_sender, &expiry_control);
             let handler = Self {
-                check_timer_expired,
+                expiry_control,
                 handler: dest_handler,
                 src_path,
                 closure_requested,
@@ -1157,8 +1102,9 @@ mod tests {
         }
 
         fn set_check_timer_expired(&mut self) {
-            self.check_timer_expired
-                .store(true, core::sync::atomic::Ordering::Relaxed);
+            self.expiry_control
+                .check_limit
+                .store(true, core::sync::atomic::Ordering::Release);
         }
 
         fn test_user_from_cached_paths(&self, expected_file_size: u64) -> TestCfdpUser {
@@ -1301,7 +1247,7 @@ mod tests {
     fn default_dest_handler(
         test_fault_handler: TestFaultHandler,
         test_packet_sender: TestCfdpSender,
-        check_timer_expired: Arc<AtomicBool>,
+        expiry_control: &TimerExpiryControl,
     ) -> TestDestHandler {
         let local_entity_cfg = LocalEntityConfig {
             id: REMOTE_ID.into(),
@@ -1314,7 +1260,7 @@ mod tests {
             test_packet_sender,
             NativeFilestore::default(),
             basic_remote_cfg_table(LOCAL_ID, 1024, true),
-            TestCheckTimerCreator::new(check_timer_expired),
+            TestCheckTimerCreator::new(expiry_control),
         )
     }
 
@@ -1372,14 +1318,17 @@ mod tests {
     fn test_basic() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let dest_handler = default_dest_handler(fault_handler, test_sender, Arc::default());
+        let dest_handler =
+            default_dest_handler(fault_handler, test_sender, &TimerExpiryControl::default());
         assert!(dest_handler.transmission_mode().is_none());
-        assert!(dest_handler
-            .local_cfg
-            .fault_handler
-            .user_hook
-            .borrow()
-            .all_queues_empty());
+        assert!(
+            dest_handler
+                .local_cfg
+                .fault_handler
+                .user_hook
+                .borrow()
+                .all_queues_empty()
+        );
         assert!(dest_handler.pdu_sender.queue_empty());
         assert_eq!(dest_handler.state(), State::Idle);
         assert_eq!(dest_handler.step(), TransactionStep::Idle);
@@ -1389,7 +1338,8 @@ mod tests {
     fn test_cancelling_idle_fsm() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut dest_handler = default_dest_handler(fault_handler, test_sender, Arc::default());
+        let mut dest_handler =
+            default_dest_handler(fault_handler, test_sender, &TimerExpiryControl::default());
         assert!(!dest_handler.cancel_request(&TransactionId::new(
             UnsignedByteFieldU8::new(0).into(),
             UnsignedByteFieldU8::new(0).into()

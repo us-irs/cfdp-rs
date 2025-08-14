@@ -2,23 +2,26 @@
 use std::{
     fs::OpenOptions,
     io::Write,
-    sync::{atomic::AtomicBool, mpsc, Arc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU16},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
 
 use cfdp::{
+    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
+    StdTimerCreator, TransactionId, UserFaultHookProvider,
     dest::DestinationHandler,
     filestore::NativeFilestore,
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
-    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
-    StdTimerCreator, TransactionId, UserFaultHookProvider,
 };
 use spacepackets::{
     cfdp::{ChecksumType, ConditionCode, TransmissionMode},
-    seq_count::SeqCountProviderSyncU16,
     util::UnsignedByteFieldU16,
 };
 
@@ -194,7 +197,7 @@ fn end_to_end_test(with_closure: bool) {
         spacepackets::cfdp::TransmissionMode::Unacknowledged,
         ChecksumType::Crc32,
     );
-    let seq_count_provider = SeqCountProviderSyncU16::default();
+    let seq_count_provider = AtomicU16::default();
     let mut source_handler = SourceHandler::new(
         local_cfg_source,
         source_tx,
