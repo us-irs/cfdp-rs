@@ -44,40 +44,40 @@ use core::{
 };
 
 use spacepackets::{
+    ByteConversionError,
     cfdp::{
+        ConditionCode, Direction, LargeFileFlag, PduType, SegmentMetadataFlag, SegmentationControl,
+        TransactionStatus, TransmissionMode,
         lv::Lv,
         pdu::{
+            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
             ack::AckPdu,
             eof::EofPdu,
             file_data::{
-                calculate_max_file_seg_len_for_max_packet_len_and_pdu_header,
                 FileDataPduCreatorWithReservedDatafield,
+                calculate_max_file_seg_len_for_max_packet_len_and_pdu_header,
             },
             finished::{DeliveryCode, FileStatus, FinishedPduReader},
             metadata::{MetadataGenericParams, MetadataPduCreator},
             nak::NakPduReader,
-            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
         },
-        ConditionCode, Direction, LargeFileFlag, PduType, SegmentMetadataFlag, SegmentationControl,
-        TransactionStatus, TransmissionMode,
     },
     util::{UnsignedByteField, UnsignedEnum},
-    ByteConversionError,
 };
 
 use spacepackets::seq_count::SequenceCountProvider;
 
 use crate::{
-    time::CountdownProvider, DummyPduProvider, EntityType, GenericSendError, PduProvider,
-    TimerCreatorProvider,
+    DummyPduProvider, EntityType, GenericSendError, PduProvider, TimerCreatorProvider,
+    time::CountdownProvider,
 };
 
 use super::{
+    LocalEntityConfig, PacketTarget, PduSendProvider, RemoteEntityConfig,
+    RemoteEntityConfigProvider, State, TransactionId, UserFaultHookProvider,
     filestore::{FilestoreError, VirtualFilestore},
     request::{ReadablePutRequest, StaticPutRequestCacher},
     user::{CfdpUser, TransactionFinishedParams},
-    LocalEntityConfig, PacketTarget, PduSendProvider, RemoteEntityConfig,
-    RemoteEntityConfigProvider, State, TransactionId, UserFaultHookProvider,
 };
 
 /// This enumeration models the different transaction steps of the source entity handler.
@@ -279,14 +279,14 @@ pub struct SourceHandler<
 }
 
 impl<
-        PduSender: PduSendProvider,
-        UserFaultHook: UserFaultHookProvider,
-        Vfs: VirtualFilestore,
-        RemoteCfgTable: RemoteEntityConfigProvider,
-        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
-        Countdown: CountdownProvider,
-        SeqCountProvider: SequenceCountProvider,
-    >
+    PduSender: PduSendProvider,
+    UserFaultHook: UserFaultHookProvider,
+    Vfs: VirtualFilestore,
+    RemoteCfgTable: RemoteEntityConfigProvider,
+    TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+    Countdown: CountdownProvider,
+    SeqCountProvider: SequenceCountProvider,
+>
     SourceHandler<
         PduSender,
         UserFaultHook,
@@ -1148,7 +1148,7 @@ impl<
             }
             spacepackets::cfdp::FaultHandlerCode::IgnoreError => (),
             spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => {
-                return Ok(FsmContext::ResetWhenPossible)
+                return Ok(FsmContext::ResetWhenPossible);
             }
         }
         self.local_cfg.fault_handler.report_fault(
@@ -1177,10 +1177,10 @@ mod tests {
     use rand::Rng;
     use spacepackets::{
         cfdp::{
+            ChecksumType, CrcFlag,
             pdu::{
                 file_data::FileDataPdu, finished::FinishedPduCreator, metadata::MetadataPduReader,
             },
-            ChecksumType, CrcFlag,
         },
         util::UnsignedByteFieldU16,
     };
@@ -1188,14 +1188,14 @@ mod tests {
 
     use super::*;
     use crate::{
+        CRC_32, FaultHandler, IndicationConfig, PduRawWithInfo, StdRemoteEntityConfigProvider,
         filestore::NativeFilestore,
         request::PutRequestOwned,
         source::TransactionStep,
         tests::{
-            basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestCheckTimer,
-            TestCheckTimerCreator, TestFaultHandler, TimerExpiryControl,
+            SentPdu, TestCfdpSender, TestCfdpUser, TestCheckTimer, TestCheckTimerCreator,
+            TestFaultHandler, TimerExpiryControl, basic_remote_cfg_table,
         },
-        FaultHandler, IndicationConfig, PduRawWithInfo, StdRemoteEntityConfigProvider, CRC_32,
     };
     use spacepackets::seq_count::SeqCountProviderSimple;
 
@@ -2052,10 +2052,11 @@ mod tests {
         let fd_pdu = FileDataPdu::from_bytes(&next_packet.raw_pdu).unwrap();
         assert_eq!(fd_pdu.file_data(), &rand_data[0..first_chunk.len()]);
         let expected_id = tb.handler.transaction_id().unwrap();
-        assert!(tb
-            .handler
-            .cancel_request(&mut cfdp_user, &expected_id)
-            .expect("cancellation failed"));
+        assert!(
+            tb.handler
+                .cancel_request(&mut cfdp_user, &expected_id)
+                .expect("cancellation failed")
+        );
         assert_eq!(tb.handler.state(), State::Idle);
         assert_eq!(tb.handler.step(), TransactionStep::Idle);
         let next_packet = tb.get_next_sent_pdu().unwrap();
