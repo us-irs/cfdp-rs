@@ -846,40 +846,39 @@ pub fn determine_packet_target(raw_pdu: &[u8]) -> Result<PacketTarget, PduError>
             expected: None,
         }
     })?;
-    let packet_target =
-        match file_directive_type {
-            // Section c) of 4.5.3: These PDUs should always be targeted towards the file sender a.k.a.
-            // the source handler
-            FileDirectiveType::NakPdu
-            | FileDirectiveType::FinishedPdu
-            | FileDirectiveType::KeepAlivePdu => PacketTarget::SourceEntity,
-            // Section b) of 4.5.3: These PDUs should always be targeted towards the file receiver a.k.a.
-            // the destination handler
-            FileDirectiveType::MetadataPdu
-            | FileDirectiveType::EofPdu
-            | FileDirectiveType::PromptPdu => PacketTarget::DestEntity,
-            // Section a): Recipient depends of the type of PDU that is being acknowledged. We can simply
-            // extract the PDU type from the raw stream. If it is an EOF PDU, this packet is passed to
-            // the source handler, for a Finished PDU, it is passed to the destination handler.
-            FileDirectiveType::AckPdu => {
-                let acked_directive = FileDirectiveType::try_from(raw_pdu[header_len + 1])
-                    .map_err(|_| PduError::InvalidDirectiveType {
-                        found: raw_pdu[header_len],
-                        expected: None,
-                    })?;
-                if acked_directive == FileDirectiveType::EofPdu {
-                    PacketTarget::SourceEntity
-                } else if acked_directive == FileDirectiveType::FinishedPdu {
-                    PacketTarget::DestEntity
-                } else {
-                    // TODO: Maybe a better error? This might be confusing..
-                    return Err(PduError::InvalidDirectiveType {
-                        found: raw_pdu[header_len + 1],
-                        expected: None,
-                    });
-                }
+    let packet_target = match file_directive_type {
+        // Section c) of 4.5.3: These PDUs should always be targeted towards the file sender a.k.a.
+        // the source handler
+        FileDirectiveType::NakPdu
+        | FileDirectiveType::FinishedPdu
+        | FileDirectiveType::KeepAlivePdu => PacketTarget::SourceEntity,
+        // Section b) of 4.5.3: These PDUs should always be targeted towards the file receiver a.k.a.
+        // the destination handler
+        FileDirectiveType::MetadataPdu
+        | FileDirectiveType::EofPdu
+        | FileDirectiveType::PromptPdu => PacketTarget::DestEntity,
+        // Section a): Recipient depends of the type of PDU that is being acknowledged. We can simply
+        // extract the PDU type from the raw stream. If it is an EOF PDU, this packet is passed to
+        // the source handler, for a Finished PDU, it is passed to the destination handler.
+        FileDirectiveType::AckPdu => {
+            let acked_directive = FileDirectiveType::try_from(raw_pdu[header_len + 1] >> 4)
+                .map_err(|_| PduError::InvalidDirectiveType {
+                    found: (raw_pdu[header_len + 1] >> 4),
+                    expected: None,
+                })?;
+            if acked_directive == FileDirectiveType::EofPdu {
+                PacketTarget::SourceEntity
+            } else if acked_directive == FileDirectiveType::FinishedPdu {
+                PacketTarget::DestEntity
+            } else {
+                // TODO: Maybe a better error? This might be confusing..
+                return Err(PduError::InvalidDirectiveType {
+                    found: raw_pdu[header_len + 1],
+                    expected: None,
+                });
             }
-        };
+        }
+    };
     Ok(packet_target)
 }
 

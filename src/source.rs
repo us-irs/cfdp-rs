@@ -261,7 +261,7 @@ pub struct SourceHandler<
     file_params: FileParams,
     // PDU configuration is cached so it can be re-used for all PDUs generated for file transfers.
     pdu_conf: CommonPduConfig,
-    countdown: RefCell<Option<Countdown>>,
+    check_timer: RefCell<Option<Countdown>>,
     positive_ack_params: RefCell<Option<PositiveAckParams<Countdown>>>,
     timer_creator: TimerCreator,
     seq_count_provider: SeqCountProvider,
@@ -332,7 +332,7 @@ impl<
             file_params: Default::default(),
             pdu_conf: Default::default(),
             anomalies: Default::default(),
-            countdown: RefCell::new(None),
+            check_timer: RefCell::new(None),
             positive_ack_params: RefCell::new(None),
             timer_creator,
             seq_count_provider,
@@ -596,7 +596,7 @@ impl<
         self.state_helper = Default::default();
         self.transfer_state = None;
         self.file_params = Default::default();
-        *self.countdown.borrow_mut() = None;
+        *self.check_timer.borrow_mut() = None;
     }
 
     #[inline]
@@ -713,7 +713,9 @@ impl<
         user: &mut impl CfdpUser,
     ) -> Result<(), SourceError> {
         // If we reach this state, countdown definitely is set.
-        if self.countdown.borrow().as_ref().unwrap().has_expired() {
+        if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged
+            && self.check_timer.borrow().as_ref().unwrap().has_expired()
+        {
             self.declare_fault(user, ConditionCode::CheckLimitReached)?;
         }
         Ok(())
@@ -729,7 +731,7 @@ impl<
         self.prepare_and_send_eof_pdu(user, checksum)?;
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
             if self.tstate_ref().closure_requested.get() {
-                *self.countdown.borrow_mut() = Some(self.timer_creator.create_countdown(
+                *self.check_timer.borrow_mut() = Some(self.timer_creator.create_countdown(
                     crate::TimerContext::CheckLimit {
                         local_id: self.local_cfg.id,
                         remote_id: self.tstate_ref().remote_cfg.borrow().entity_id,
@@ -1173,6 +1175,7 @@ mod tests {
 
     struct SourceHandlerTestbench {
         handler: TestSourceHandler,
+        transmission_mode: TransmissionMode,
         #[allow(dead_code)]
         srcfile_handle: TempPath,
         srcfile: String,
@@ -1190,6 +1193,7 @@ mod tests {
 
     impl SourceHandlerTestbench {
         fn new(
+            transmission_mode: TransmissionMode,
             crc_on_transmission_by_default: bool,
             test_fault_handler: TestFaultHandler,
             test_packet_sender: TestCfdpSender,
@@ -1218,6 +1222,7 @@ mod tests {
                     StdTimerCreator::new(core::time::Duration::from_millis(100)),
                     SeqCountProviderSimple::default(),
                 ),
+                transmission_mode,
                 srcfile_handle,
                 srcfile,
                 destfile: String::from(destfile.to_path_buf().to_str().unwrap()),
@@ -1285,7 +1290,7 @@ mod tests {
             assert_eq!(pdu_header.common_pdu_conf().crc_flag, crc_flag);
             assert_eq!(
                 pdu_header.common_pdu_conf().trans_mode,
-                TransmissionMode::Unacknowledged
+                self.transmission_mode
             );
             assert_eq!(
                 pdu_header.common_pdu_conf().direction,
@@ -1318,7 +1323,7 @@ mod tests {
                 Some(with_closure),
             )
             .expect("creating put request failed");
-            let transaction_info = self.common_no_acked_file_transfer(
+            let transaction_info = self.common_file_transfer_init_with_metadata_check(
                 cfdp_user,
                 put_request,
                 cfdp_user.expected_file_size,
@@ -1347,7 +1352,7 @@ mod tests {
             (transaction_info.pdu_header, fd_pdus)
         }
 
-        fn common_no_acked_file_transfer(
+        fn common_file_transfer_init_with_metadata_check(
             &mut self,
             cfdp_user: &mut TestCfdpUser,
             put_request: PutRequestOwned,
@@ -1399,6 +1404,7 @@ mod tests {
                 metadata_pdu.metadata_params().checksum_type,
                 ChecksumType::Crc32
             );
+            assert_eq!(metadata_pdu.transmission_mode(), self.transmission_mode);
             let closure_requested = if let Some(closure_requested) = put_request.closure_requested {
                 assert_eq!(
                     metadata_pdu.metadata_params().closure_requested,
@@ -1454,13 +1460,19 @@ mod tests {
                     .value_const(),
                 0
             );
-            if !closure_requested {
-                assert_eq!(self.handler.state(), State::Idle);
-                assert_eq!(self.handler.step(), TransactionStep::Idle);
+            if self.transmission_mode == TransmissionMode::Unacknowledged {
+                if !closure_requested {
+                    assert_eq!(self.handler.state(), State::Idle);
+                    assert_eq!(self.handler.step(), TransactionStep::Idle);
+                } else {
+                    assert_eq!(self.handler.state(), State::Busy);
+                    assert_eq!(self.handler.step(), TransactionStep::WaitingForFinished);
+                }
             } else {
                 assert_eq!(self.handler.state(), State::Busy);
-                assert_eq!(self.handler.step(), TransactionStep::WaitingForFinished);
+                assert_eq!(self.handler.step(), TransactionStep::WaitingForEofAck);
             }
+
             assert_eq!(cfdp_user.transaction_indication_call_count, 1);
             assert_eq!(cfdp_user.eof_sent_call_count, 1);
             self.all_fault_queues_empty();
@@ -1488,6 +1500,7 @@ mod tests {
             pdu_header
         }
 
+        // Finish handling: Simulate completion from the destination side by insert finished PDU.
         fn finish_handling(&mut self, user: &mut TestCfdpUser, pdu_header: PduHeader) {
             let finished_pdu = FinishedPduCreator::new_default(
                 pdu_header,
@@ -1516,7 +1529,13 @@ mod tests {
     fn test_basic() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         assert!(tb.handler.transmission_mode().is_none());
         assert!(tb.pdu_queue_empty());
     }
@@ -1525,7 +1544,13 @@ mod tests {
     fn test_empty_file_transfer_not_acked_no_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         let filesize = 0;
         let put_request = PutRequestOwned::new_regular_request(
             REMOTE_ID.into(),
@@ -1537,7 +1562,7 @@ mod tests {
         .expect("creating put request failed");
         let mut cfdp_user = tb.create_user(0, filesize);
         let transaction_info =
-            tb.common_no_acked_file_transfer(&mut cfdp_user, put_request, filesize);
+            tb.common_file_transfer_init_with_metadata_check(&mut cfdp_user, put_request, filesize);
         tb.common_eof_pdu_check(
             &mut cfdp_user,
             transaction_info.closure_requested,
@@ -1547,11 +1572,63 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_file_transfer_acked() {
+        let fault_handler = TestFaultHandler::default();
+        let test_sender = TestCfdpSender::default();
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Acknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
+        let filesize = 0;
+        let put_request = PutRequestOwned::new_regular_request(
+            REMOTE_ID.into(),
+            &tb.srcfile,
+            &tb.destfile,
+            Some(TransmissionMode::Acknowledged),
+            Some(false),
+        )
+        .expect("creating put request failed");
+        let mut cfdp_user = tb.create_user(0, filesize);
+        let transaction_info =
+            tb.common_file_transfer_init_with_metadata_check(&mut cfdp_user, put_request, filesize);
+        tb.common_eof_pdu_check(
+            &mut cfdp_user,
+            transaction_info.closure_requested,
+            filesize,
+            CRC_32.digest().finalize(),
+        );
+
+        let ack_pdu = AckPdu::new(
+            transaction_info.pdu_header,
+            FileDirectiveType::EofPdu,
+            ConditionCode::NoError,
+            TransactionStatus::Active,
+        )
+        .expect("creating ACK PDU failed");
+        let ack_pdu_vec = ack_pdu.to_vec().unwrap();
+        let packet_info = PduRawWithInfo::new(&ack_pdu_vec).unwrap();
+        tb.handler
+            .state_machine(&mut cfdp_user, Some(&packet_info))
+            .expect("state machine failed");
+        tb.finish_handling(&mut cfdp_user, transaction_info.pdu_header);
+        // TODO: Check ACK PDU sent for finished PDU.
+    }
+
+    #[test]
     fn test_tiny_file_transfer_not_acked_no_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
         let mut cfdp_user = TestCfdpUser::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         tb.common_tiny_file_transfer(&mut cfdp_user, false);
     }
 
@@ -1559,7 +1636,13 @@ mod tests {
     fn test_tiny_file_transfer_not_acked_with_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         let mut cfdp_user = TestCfdpUser::default();
         let pdu_header = tb.common_tiny_file_transfer(&mut cfdp_user, true);
         tb.finish_handling(&mut cfdp_user, pdu_header)
@@ -1569,7 +1652,13 @@ mod tests {
     fn test_two_segment_file_transfer_not_acked_no_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 128);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            128,
+        );
         let mut cfdp_user = TestCfdpUser::default();
         let mut file = OpenOptions::new()
             .write(true)
@@ -1588,7 +1677,13 @@ mod tests {
     fn test_two_segment_file_transfer_not_acked_with_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 128);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            128,
+        );
         let mut cfdp_user = TestCfdpUser::default();
         let mut file = OpenOptions::new()
             .write(true)
@@ -1609,7 +1704,13 @@ mod tests {
     fn test_empty_file_transfer_not_acked_with_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         let filesize = 0;
         let put_request = PutRequestOwned::new_regular_request(
             REMOTE_ID.into(),
@@ -1621,7 +1722,7 @@ mod tests {
         .expect("creating put request failed");
         let mut cfdp_user = tb.create_user(0, filesize);
         let transaction_info =
-            tb.common_no_acked_file_transfer(&mut cfdp_user, put_request, filesize);
+            tb.common_file_transfer_init_with_metadata_check(&mut cfdp_user, put_request, filesize);
         tb.common_eof_pdu_check(
             &mut cfdp_user,
             transaction_info.closure_requested,
@@ -1635,7 +1736,13 @@ mod tests {
     fn test_put_request_no_remote_cfg() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
 
         let (srcfile, destfile) = init_full_filepaths_textfile();
         let srcfile_str = String::from(srcfile.to_str().unwrap());
@@ -1662,7 +1769,13 @@ mod tests {
     fn test_put_request_file_does_not_exist() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
 
         let file_which_does_not_exist = "/tmp/this_file_does_not_exist.txt";
         let destfile = "/tmp/tmp.txt";
@@ -1686,7 +1799,13 @@ mod tests {
     fn test_finished_pdu_check_timeout() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         tb.set_check_limit_timeout(Duration::from_millis(45));
         let filesize = 0;
         let put_request = PutRequestOwned::new_regular_request(
@@ -1699,7 +1818,7 @@ mod tests {
         .expect("creating put request failed");
         let mut cfdp_user = tb.create_user(0, filesize);
         let transaction_info =
-            tb.common_no_acked_file_transfer(&mut cfdp_user, put_request, filesize);
+            tb.common_file_transfer_init_with_metadata_check(&mut cfdp_user, put_request, filesize);
         let expected_id = tb.handler.transaction_id().unwrap();
         tb.common_eof_pdu_check(
             &mut cfdp_user,
@@ -1738,7 +1857,13 @@ mod tests {
     fn test_cancelled_transfer_empty_file() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 512);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
         let filesize = 0;
         let put_request = PutRequestOwned::new_regular_request(
             REMOTE_ID.into(),
@@ -1785,7 +1910,13 @@ mod tests {
     fn test_cancelled_transfer_mid_transfer() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut tb = SourceHandlerTestbench::new(false, fault_handler, test_sender, 128);
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Unacknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            128,
+        );
         let mut file = OpenOptions::new()
             .write(true)
             .open(&tb.srcfile)
@@ -1805,8 +1936,11 @@ mod tests {
         .expect("creating put request failed");
         let file_size = rand_data.len() as u64;
         let mut cfdp_user = tb.create_user(0, file_size);
-        let transaction_info =
-            tb.common_no_acked_file_transfer(&mut cfdp_user, put_request, file_size);
+        let transaction_info = tb.common_file_transfer_init_with_metadata_check(
+            &mut cfdp_user,
+            put_request,
+            file_size,
+        );
         let mut chunks = rand_data.chunks(
             calculate_max_file_seg_len_for_max_packet_len_and_pdu_header(
                 &transaction_info.pdu_header,
