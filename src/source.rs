@@ -406,58 +406,6 @@ impl<
         &self.local_cfg
     }
 
-    fn insert_packet(
-        &mut self,
-        _cfdp_user: &mut impl CfdpUser,
-        packet_to_insert: &impl PduProvider,
-    ) -> Result<(), SourceError> {
-        if packet_to_insert.packet_target()? != PacketTarget::SourceEntity {
-            // Unwrap is okay here, a PacketInfo for a file data PDU should always have the
-            // destination as the target.
-            return Err(SourceError::CantProcessPacketType {
-                pdu_type: packet_to_insert.pdu_type(),
-                directive_type: packet_to_insert.file_directive_type(),
-            });
-        }
-        if packet_to_insert.pdu_type() == PduType::FileData {
-            // The [PacketInfo] API should ensure that file data PDUs can not be passed
-            // into a source entity, so this should never happen.
-            return Err(SourceError::UnexpectedPdu {
-                pdu_type: PduType::FileData,
-                directive_type: None,
-            });
-        }
-        // Unwrap is okay here, the [PacketInfo] API should ensure that the directive type is
-        // always a valid value.
-        match packet_to_insert
-            .file_directive_type()
-            .expect("PDU directive type unexpectedly not set")
-        {
-            FileDirectiveType::FinishedPdu => {
-                let finished_pdu = FinishedPduReader::new(packet_to_insert.pdu())?;
-                self.handle_finished_pdu(&finished_pdu)?
-            }
-            FileDirectiveType::NakPdu => {
-                let nak_pdu = NakPduReader::new(packet_to_insert.pdu())?;
-                self.handle_nak_pdu(&nak_pdu)?
-            }
-            FileDirectiveType::KeepAlivePdu => self.handle_keep_alive_pdu(),
-            FileDirectiveType::AckPdu => {
-                let ack_pdu = AckPdu::from_bytes(packet_to_insert.pdu())?;
-                self.handle_ack_pdu(&ack_pdu)?
-            }
-            FileDirectiveType::EofPdu
-            | FileDirectiveType::PromptPdu
-            | FileDirectiveType::MetadataPdu => {
-                return Err(SourceError::CantProcessPacketType {
-                    pdu_type: packet_to_insert.pdu_type(),
-                    directive_type: packet_to_insert.file_directive_type(),
-                });
-            }
-        }
-        Ok(())
-    }
-
     /// This function is used to pass a put request to the source handler, which is
     /// also used to start a file copy operation. As such, this function models the Put.request
     /// CFDP primtiive.
@@ -559,6 +507,58 @@ impl<
         Ok(())
     }
 
+    fn insert_packet(
+        &mut self,
+        _cfdp_user: &mut impl CfdpUser,
+        packet_to_insert: &impl PduProvider,
+    ) -> Result<(), SourceError> {
+        if packet_to_insert.packet_target()? != PacketTarget::SourceEntity {
+            // Unwrap is okay here, a PacketInfo for a file data PDU should always have the
+            // destination as the target.
+            return Err(SourceError::CantProcessPacketType {
+                pdu_type: packet_to_insert.pdu_type(),
+                directive_type: packet_to_insert.file_directive_type(),
+            });
+        }
+        if packet_to_insert.pdu_type() == PduType::FileData {
+            // The [PacketInfo] API should ensure that file data PDUs can not be passed
+            // into a source entity, so this should never happen.
+            return Err(SourceError::UnexpectedPdu {
+                pdu_type: PduType::FileData,
+                directive_type: None,
+            });
+        }
+        // Unwrap is okay here, the [PacketInfo] API should ensure that the directive type is
+        // always a valid value.
+        match packet_to_insert
+            .file_directive_type()
+            .expect("PDU directive type unexpectedly not set")
+        {
+            FileDirectiveType::FinishedPdu => {
+                let finished_pdu = FinishedPduReader::new(packet_to_insert.pdu())?;
+                self.handle_finished_pdu(&finished_pdu)?
+            }
+            FileDirectiveType::NakPdu => {
+                let nak_pdu = NakPduReader::new(packet_to_insert.pdu())?;
+                self.handle_nak_pdu(&nak_pdu)?
+            }
+            FileDirectiveType::KeepAlivePdu => self.handle_keep_alive_pdu(),
+            FileDirectiveType::AckPdu => {
+                let ack_pdu = AckPdu::from_bytes(packet_to_insert.pdu())?;
+                self.handle_ack_pdu(&ack_pdu)?
+            }
+            FileDirectiveType::EofPdu
+            | FileDirectiveType::PromptPdu
+            | FileDirectiveType::MetadataPdu => {
+                return Err(SourceError::CantProcessPacketType {
+                    pdu_type: packet_to_insert.pdu_type(),
+                    directive_type: packet_to_insert.file_directive_type(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// This functions models the Cancel.request CFDP primitive and is the recommended way to
     /// cancel a transaction.
     ///
@@ -586,6 +586,17 @@ impl<
             }
         }
         Ok(false)
+    }
+
+    /// This function is public to allow completely resetting the handler, but it is explicitely
+    /// discouraged to do this. CFDP has mechanism to detect issues and errors on itself.
+    /// Resetting the handler might interfere with these mechanisms and lead to unexpected
+    /// behaviour.
+    pub fn reset(&mut self) {
+        self.state_helper = Default::default();
+        self.transfer_state = None;
+        self.file_params = Default::default();
+        *self.countdown.borrow_mut() = None;
     }
 
     #[inline]
@@ -706,13 +717,6 @@ impl<
             self.declare_fault(user, ConditionCode::CheckLimitReached)?;
         }
         Ok(())
-    }
-
-    // Internal helper function.
-    fn tstate_ref(&self) -> &TransferState {
-        self.transfer_state
-            .as_ref()
-            .expect("transfer state should be set in busy state")
     }
 
     fn eof_fsm(&mut self, user: &mut impl CfdpUser) -> Result<(), SourceError> {
@@ -1028,35 +1032,6 @@ impl<
         Ok(())
     }
 
-    fn handle_keep_alive_pdu(&mut self) {}
-
-    fn declare_fault(
-        &mut self,
-        user: &mut impl CfdpUser,
-        cond: ConditionCode,
-    ) -> Result<(), SourceError> {
-        // Need to cache those in advance, because a notice of cancellation can reset the handler.
-        let transaction_id = self.transaction_id().unwrap();
-        let progress = self.file_params.progress;
-        let fh = self.local_cfg.fault_handler.get_fault_handler(cond);
-        match fh {
-            spacepackets::cfdp::FaultHandlerCode::NoticeOfCancellation => {
-                if let ControlFlow::Break(_) = self.notice_of_cancellation(user, cond)? {
-                    return Ok(());
-                }
-            }
-            spacepackets::cfdp::FaultHandlerCode::NoticeOfSuspension => {
-                self.notice_of_suspension_internal();
-            }
-            spacepackets::cfdp::FaultHandlerCode::IgnoreError => (),
-            spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => self.abandon_transaction(),
-        }
-        self.local_cfg
-            .fault_handler
-            .report_fault(transaction_id, cond, progress);
-        Ok(())
-    }
-
     pub fn notice_of_cancellation(
         &mut self,
         user: &mut impl CfdpUser,
@@ -1101,6 +1076,33 @@ impl<
         self.notice_of_suspension_internal();
     }
 
+    fn declare_fault(
+        &mut self,
+        user: &mut impl CfdpUser,
+        cond: ConditionCode,
+    ) -> Result<(), SourceError> {
+        // Need to cache those in advance, because a notice of cancellation can reset the handler.
+        let transaction_id = self.transaction_id().unwrap();
+        let progress = self.file_params.progress;
+        let fh = self.local_cfg.fault_handler.get_fault_handler(cond);
+        match fh {
+            spacepackets::cfdp::FaultHandlerCode::NoticeOfCancellation => {
+                if let ControlFlow::Break(_) = self.notice_of_cancellation(user, cond)? {
+                    return Ok(());
+                }
+            }
+            spacepackets::cfdp::FaultHandlerCode::NoticeOfSuspension => {
+                self.notice_of_suspension_internal();
+            }
+            spacepackets::cfdp::FaultHandlerCode::IgnoreError => (),
+            spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => self.abandon_transaction(),
+        }
+        self.local_cfg
+            .fault_handler
+            .report_fault(transaction_id, cond, progress);
+        Ok(())
+    }
+
     fn notice_of_suspension_internal(&self) {}
 
     fn abandon_transaction(&mut self) {
@@ -1109,16 +1111,14 @@ impl<
         self.reset();
     }
 
-    /// This function is public to allow completely resetting the handler, but it is explicitely
-    /// discouraged to do this. CFDP has mechanism to detect issues and errors on itself.
-    /// Resetting the handler might interfere with these mechanisms and lead to unexpected
-    /// behaviour.
-    pub fn reset(&mut self) {
-        self.state_helper = Default::default();
-        self.transfer_state = None;
-        self.file_params = Default::default();
-        *self.countdown.borrow_mut() = None;
+    // Internal helper function.
+    fn tstate_ref(&self) -> &TransferState {
+        self.transfer_state
+            .as_ref()
+            .expect("transfer state should be set in busy state")
     }
+
+    fn handle_keep_alive_pdu(&mut self) {}
 }
 
 #[cfg(test)]
