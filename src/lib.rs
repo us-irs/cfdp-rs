@@ -100,7 +100,7 @@ pub mod user;
 
 use crate::time::CountdownProvider;
 use core::{cell::RefCell, fmt::Debug, hash::Hash};
-use crc::{CRC_32_ISCSI, CRC_32_ISO_HDLC, Crc};
+use crc::{Crc, CRC_32_ISCSI, CRC_32_ISO_HDLC};
 
 #[cfg(feature = "alloc")]
 pub use alloc_mod::*;
@@ -109,8 +109,8 @@ use core::time::Duration;
 use serde::{Deserialize, Serialize};
 use spacepackets::{
     cfdp::{
-        ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
         pdu::{FileDirectiveType, PduError, PduHeader},
+        ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
     },
     util::{UnsignedByteField, UnsignedEnum},
 };
@@ -940,11 +940,11 @@ impl PduProvider for PduRawWithInfo<'_> {
 #[cfg(feature = "alloc")]
 pub mod alloc_mod {
     use spacepackets::cfdp::{
-        PduType,
         pdu::{FileDirectiveType, PduError},
+        PduType,
     };
 
-    use crate::{PacketTarget, PduProvider, PduRawWithInfo, determine_packet_target};
+    use crate::{determine_packet_target, PacketTarget, PduProvider, PduRawWithInfo};
 
     #[derive(Debug, PartialEq, Eq, Clone)]
     pub struct PduOwnedWithInfo {
@@ -1006,21 +1006,21 @@ pub(crate) mod tests {
         cell::{Cell, RefCell},
         sync::atomic::AtomicBool,
     };
-    use std::sync::Arc;
+    use std::{println, sync::Arc};
 
     use alloc::{collections::VecDeque, string::String, vec::Vec};
     use spacepackets::{
         cfdp::{
-            ChecksumType, ConditionCode, PduType, TransmissionMode,
             lv::Lv,
             pdu::{
-                CommonPduConfig, FileDirectiveType, PduHeader, WritablePduPacket,
                 eof::EofPdu,
                 file_data::FileDataPdu,
                 metadata::{MetadataGenericParams, MetadataPduCreator},
+                CommonPduConfig, FileDirectiveType, PduHeader, WritablePduPacket,
             },
+            ChecksumType, ConditionCode, PduType, TransmissionMode,
         },
-        util::{UnsignedByteField, UnsignedByteFieldU8, UnsignedByteFieldU16, UnsignedEnum},
+        util::{UnsignedByteField, UnsignedByteFieldU16, UnsignedByteFieldU8, UnsignedEnum},
     };
     use user::{CfdpUser, OwnedMetadataRecvdParams, TransactionFinishedParams};
 
@@ -1036,6 +1036,18 @@ pub(crate) mod tests {
     pub(crate) struct TimerExpiryControl {
         pub(crate) check_limit: Arc<AtomicBool>,
         pub(crate) positive_ack: Arc<AtomicBool>,
+    }
+
+    impl TimerExpiryControl {
+        pub fn set_check_limit_expired(&mut self) {
+            self.check_limit
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+
+        pub fn set_positive_ack_expired(&mut self) {
+            self.positive_ack
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
     }
 
     #[derive(Debug)]
@@ -1069,12 +1081,11 @@ pub(crate) mod tests {
                     local_id: _,
                     remote_id: _,
                     entity_type: _,
-                } => {}
-                TimerContext::NakActivity { expiry_time: _ } => {
-                    self.expiry_control
-                        .check_limit
-                        .store(false, core::sync::atomic::Ordering::Release);
-                }
+                } => self
+                    .expiry_control
+                    .check_limit
+                    .store(false, core::sync::atomic::Ordering::Release),
+                TimerContext::NakActivity { expiry_time: _ } => todo!(),
                 TimerContext::PositiveAck { expiry_time: _ } => self
                     .expiry_control
                     .positive_ack
@@ -1343,6 +1354,12 @@ pub(crate) mod tests {
             file_directive_type: Option<FileDirectiveType>,
             raw_pdu: &[u8],
         ) -> Result<(), GenericSendError> {
+            println!(
+                "sent pdu: {:?}, directive: {:?}, len: {}",
+                pdu_type,
+                file_directive_type,
+                raw_pdu.len()
+            );
             self.packet_queue.borrow_mut().push_back(SentPdu {
                 pdu_type,
                 file_directive_type,
@@ -1356,6 +1373,7 @@ pub(crate) mod tests {
         pub fn retrieve_next_pdu(&self) -> Option<SentPdu> {
             self.packet_queue.borrow_mut().pop_front()
         }
+
         pub fn queue_empty(&self) -> bool {
             self.packet_queue.borrow_mut().is_empty()
         }

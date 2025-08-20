@@ -44,40 +44,40 @@ use core::{
 };
 
 use spacepackets::{
-    ByteConversionError,
     cfdp::{
-        ConditionCode, Direction, LargeFileFlag, PduType, SegmentMetadataFlag, SegmentationControl,
-        TransactionStatus, TransmissionMode,
         lv::Lv,
         pdu::{
-            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
             ack::AckPdu,
             eof::EofPdu,
             file_data::{
-                FileDataPduCreatorWithReservedDatafield,
                 calculate_max_file_seg_len_for_max_packet_len_and_pdu_header,
+                FileDataPduCreatorWithReservedDatafield,
             },
             finished::{DeliveryCode, FileStatus, FinishedPduReader},
             metadata::{MetadataGenericParams, MetadataPduCreator},
             nak::NakPduReader,
+            CfdpPdu, CommonPduConfig, FileDirectiveType, PduError, PduHeader, WritablePduPacket,
         },
+        ConditionCode, Direction, LargeFileFlag, PduType, SegmentMetadataFlag, SegmentationControl,
+        TransactionStatus, TransmissionMode,
     },
     util::{UnsignedByteField, UnsignedEnum},
+    ByteConversionError,
 };
 
 use spacepackets::seq_count::SequenceCountProvider;
 
 use crate::{
-    DummyPduProvider, EntityType, GenericSendError, PduProvider, TimerCreatorProvider,
-    time::CountdownProvider,
+    time::CountdownProvider, DummyPduProvider, EntityType, GenericSendError, PduProvider,
+    TimerCreatorProvider,
 };
 
 use super::{
-    LocalEntityConfig, PacketTarget, PduSendProvider, RemoteEntityConfig,
-    RemoteEntityConfigProvider, State, TransactionId, UserFaultHookProvider,
     filestore::{FilestoreError, VirtualFilestore},
     request::{ReadablePutRequest, StaticPutRequestCacher},
     user::{CfdpUser, TransactionFinishedParams},
+    LocalEntityConfig, PacketTarget, PduSendProvider, RemoteEntityConfig,
+    RemoteEntityConfigProvider, State, TransactionId, UserFaultHookProvider,
 };
 
 /// This enumeration models the different transaction steps of the source entity handler.
@@ -211,8 +211,15 @@ struct PositiveAckParams<Countdown: CountdownProvider> {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct AnomlyTracker {
+pub struct AnomalyTracker {
     invalid_ack_directive_code: u8,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum FsmContext {
+    #[default]
+    None,
+    ResetWhenPossible,
 }
 
 /// This is the primary CFDP source handler. It models the CFDP source entity, which is
@@ -268,18 +275,18 @@ pub struct SourceHandler<
     positive_ack_params: RefCell<Option<PositiveAckParams<Countdown>>>,
     timer_creator: TimerCreator,
     seq_count_provider: SeqCountProvider,
-    anomalies: AnomlyTracker,
+    anomalies: AnomalyTracker,
 }
 
 impl<
-    PduSender: PduSendProvider,
-    UserFaultHook: UserFaultHookProvider,
-    Vfs: VirtualFilestore,
-    RemoteCfgTable: RemoteEntityConfigProvider,
-    TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
-    Countdown: CountdownProvider,
-    SeqCountProvider: SequenceCountProvider,
->
+        PduSender: PduSendProvider,
+        UserFaultHook: UserFaultHookProvider,
+        Vfs: VirtualFilestore,
+        RemoteCfgTable: RemoteEntityConfigProvider,
+        TimerCreator: TimerCreatorProvider<Countdown = Countdown>,
+        Countdown: CountdownProvider,
+        SeqCountProvider: SequenceCountProvider,
+    >
     SourceHandler<
         PduSender,
         UserFaultHook,
@@ -584,7 +591,7 @@ impl<
         if let Some(active_id) = self.transaction_id() {
             if active_id == *transaction_id {
                 // Control flow result can be ignored here for the cancel request.
-                let _ = self.notice_of_cancellation(user, ConditionCode::CancelRequestReceived)?;
+                self.notice_of_cancellation(user, ConditionCode::CancelRequestReceived)?;
                 return Ok(true);
             }
         }
@@ -684,9 +691,11 @@ impl<
                 }
             }
         }
-        if positive_ack_limit_reached {
-            // TODO: Is it a good idea to ignore this result?
-            let _ = self.declare_fault(user, ConditionCode::PositiveAckLimitReached);
+        if positive_ack_limit_reached
+            && self.declare_fault(user, ConditionCode::PositiveAckLimitReached)?
+                == FsmContext::ResetWhenPossible
+        {
+            self.reset();
         }
         Ok(())
     }
@@ -723,10 +732,15 @@ impl<
         user: &mut impl CfdpUser,
     ) -> Result<(), SourceError> {
         // If we reach this state, countdown definitely is set.
+        #[allow(clippy::collapsible_if)]
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged
             && self.check_timer.borrow().as_ref().unwrap().has_expired()
         {
-            self.declare_fault(user, ConditionCode::CheckLimitReached)?;
+            if self.declare_fault(user, ConditionCode::CheckLimitReached)?
+                == FsmContext::ResetWhenPossible
+            {
+                self.reset();
+            }
         }
         Ok(())
     }
@@ -1049,7 +1063,22 @@ impl<
         &mut self,
         user: &mut impl CfdpUser,
         condition_code: ConditionCode,
-    ) -> Result<ControlFlow<()>, SourceError> {
+    ) -> Result<(), SourceError> {
+        match self.notice_of_cancellation_internal(user, condition_code)? {
+            ControlFlow::Continue(ctx) | ControlFlow::Break(ctx) => {
+                if ctx == FsmContext::ResetWhenPossible {
+                    self.reset();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn notice_of_cancellation_internal(
+        &self,
+        user: &mut impl CfdpUser,
+        condition_code: ConditionCode,
+    ) -> Result<ControlFlow<FsmContext, FsmContext>, SourceError> {
         let transaction_id = self.transaction_id().unwrap();
         // CFDP standard 4.11.2.2.3: Any fault declared in the course of transferring
         // the EOF (cancel) PDU must result in abandonment of the transaction.
@@ -1061,8 +1090,7 @@ impl<
                     .user_hook
                     .borrow_mut()
                     .abandoned_cb(transaction_id, cond_code_eof, self.file_params.progress);
-                self.abandon_transaction();
-                return Ok(ControlFlow::Break(()));
+                return Ok(ControlFlow::Break(FsmContext::ResetWhenPossible));
             }
         }
 
@@ -1078,50 +1106,57 @@ impl<
         self.prepare_and_send_eof_pdu(user, checksum)?;
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
             // We are done.
-            self.reset();
+            Ok(ControlFlow::Continue(FsmContext::ResetWhenPossible))
         } else {
-            self.set_step(TransactionStep::WaitingForEofAck);
+            self.set_step_internal(TransactionStep::WaitingForEofAck);
+            Ok(ControlFlow::Continue(FsmContext::default()))
         }
-        Ok(ControlFlow::Continue(()))
     }
 
     pub fn notice_of_suspension(&mut self) {
         self.notice_of_suspension_internal();
     }
 
+    fn notice_of_suspension_internal(&self) {}
+
+    pub fn abandon_transaction(&mut self) {
+        // I guess an abandoned transaction just stops whatever the handler is doing and resets
+        // it to a clean state.. The implementation for this is quite easy.
+        self.reset();
+    }
+
     fn declare_fault(
-        &mut self,
+        &self,
         user: &mut impl CfdpUser,
         cond: ConditionCode,
-    ) -> Result<(), SourceError> {
-        // Need to cache those in advance, because a notice of cancellation can reset the handler.
-        let transaction_id = self.transaction_id().unwrap();
-        let progress = self.file_params.progress;
+    ) -> Result<FsmContext, SourceError> {
         let fh = self.local_cfg.fault_handler.get_fault_handler(cond);
+        let mut ctx = FsmContext::default();
         match fh {
             spacepackets::cfdp::FaultHandlerCode::NoticeOfCancellation => {
-                if let ControlFlow::Break(_) = self.notice_of_cancellation(user, cond)? {
-                    return Ok(());
+                match self.notice_of_cancellation_internal(user, cond)? {
+                    ControlFlow::Continue(ctx_cancellation) => {
+                        ctx = ctx_cancellation;
+                    }
+                    ControlFlow::Break(ctx_cancellation) => {
+                        return Ok(ctx_cancellation);
+                    }
                 }
             }
             spacepackets::cfdp::FaultHandlerCode::NoticeOfSuspension => {
                 self.notice_of_suspension_internal();
             }
             spacepackets::cfdp::FaultHandlerCode::IgnoreError => (),
-            spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => self.abandon_transaction(),
+            spacepackets::cfdp::FaultHandlerCode::AbandonTransaction => {
+                return Ok(FsmContext::ResetWhenPossible)
+            }
         }
-        self.local_cfg
-            .fault_handler
-            .report_fault(transaction_id, cond, progress);
-        Ok(())
-    }
-
-    fn notice_of_suspension_internal(&self) {}
-
-    fn abandon_transaction(&mut self) {
-        // I guess an abandoned transaction just stops whatever the handler is doing and resets
-        // it to a clean state.. The implementation for this is quite easy.
-        self.reset();
+        self.local_cfg.fault_handler.report_fault(
+            self.transaction_id().unwrap(),
+            cond,
+            self.file_params.progress,
+        );
+        Ok(ctx)
     }
 
     // Internal helper function.
@@ -1136,17 +1171,16 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use core::time::Duration;
-    use std::{fs::OpenOptions, io::Write, path::PathBuf, thread, vec::Vec};
+    use std::{fs::OpenOptions, io::Write, path::PathBuf, vec::Vec};
 
     use alloc::string::String;
     use rand::Rng;
     use spacepackets::{
         cfdp::{
-            ChecksumType, CrcFlag,
             pdu::{
                 file_data::FileDataPdu, finished::FinishedPduCreator, metadata::MetadataPduReader,
             },
+            ChecksumType, CrcFlag,
         },
         util::UnsignedByteFieldU16,
     };
@@ -1154,12 +1188,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        CRC_32, FaultHandler, IndicationConfig, PduRawWithInfo, StdCountdown,
-        StdRemoteEntityConfigProvider, StdTimerCreator,
         filestore::NativeFilestore,
         request::PutRequestOwned,
         source::TransactionStep,
-        tests::{SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler, basic_remote_cfg_table},
+        tests::{
+            basic_remote_cfg_table, SentPdu, TestCfdpSender, TestCfdpUser, TestCheckTimer,
+            TestCheckTimerCreator, TestFaultHandler, TimerExpiryControl,
+        },
+        FaultHandler, IndicationConfig, PduRawWithInfo, StdRemoteEntityConfigProvider, CRC_32,
     };
     use spacepackets::seq_count::SeqCountProviderSimple;
 
@@ -1179,13 +1215,14 @@ mod tests {
         TestFaultHandler,
         NativeFilestore,
         StdRemoteEntityConfigProvider,
-        StdTimerCreator,
-        StdCountdown,
+        TestCheckTimerCreator,
+        TestCheckTimer,
         SeqCountProviderSimple<u16>,
     >;
 
     struct SourceHandlerTestbench {
         handler: TestSourceHandler,
+        expiry_control: TimerExpiryControl,
         transmission_mode: TransmissionMode,
         #[allow(dead_code)]
         srcfile_handle: TempPath,
@@ -1218,6 +1255,7 @@ mod tests {
             let static_put_request_cacher = StaticPutRequestCacher::new(2048);
             let (srcfile_handle, destfile) = init_full_filepaths_textfile();
             let srcfile = String::from(srcfile_handle.to_path_buf().to_str().unwrap());
+            let expiry_control = TimerExpiryControl::default();
             Self {
                 handler: SourceHandler::new(
                     local_entity_cfg,
@@ -1230,10 +1268,11 @@ mod tests {
                         max_packet_len,
                         crc_on_transmission_by_default,
                     ),
-                    StdTimerCreator::new(core::time::Duration::from_millis(100)),
+                    TestCheckTimerCreator::new(&expiry_control),
                     SeqCountProviderSimple::default(),
                 ),
                 transmission_mode,
+                expiry_control,
                 srcfile_handle,
                 srcfile,
                 destfile: String::from(destfile.to_path_buf().to_str().unwrap()),
@@ -1249,10 +1288,6 @@ mod tests {
                 self.destfile.clone(),
                 filesize,
             )
-        }
-
-        fn set_check_limit_timeout(&mut self, timeout: Duration) {
-            self.handler.timer_creator.check_limit_timeout = timeout;
         }
 
         fn put_request(
@@ -1864,7 +1899,6 @@ mod tests {
             test_sender,
             512,
         );
-        tb.set_check_limit_timeout(Duration::from_millis(45));
         let filesize = 0;
         let put_request = PutRequestOwned::new_regular_request(
             REMOTE_ID.into(),
@@ -1884,14 +1918,17 @@ mod tests {
             filesize,
             CRC_32.digest().finalize(),
         );
-        // After 50 ms delay, we run into a timeout, which leads to a check limit error
-        // declaration -> leads to a notice of cancellation -> leads to an EOF PDU with the
-        // appropriate error code.
-        thread::sleep(Duration::from_millis(50));
+        assert!(tb.pdu_queue_empty());
+
+        // Enforce a check limit error by expiring the check limit timer -> leads to a notice of
+        // cancellation -> leads to an EOF PDU with the appropriate error code.
+        tb.expiry_control.set_check_limit_expired();
+
         assert_eq!(
             tb.handler.state_machine_no_packet(&mut cfdp_user).unwrap(),
             0
         );
+        assert!(!tb.pdu_queue_empty());
         let next_pdu = tb.get_next_sent_pdu().unwrap();
         let eof_pdu = EofPdu::from_bytes(&next_pdu.raw_pdu).expect("invalid EOF PDU format");
         tb.common_pdu_check_for_file_transfer(eof_pdu.pdu_header(), CrcFlag::NoCrc);
@@ -2015,11 +2052,10 @@ mod tests {
         let fd_pdu = FileDataPdu::from_bytes(&next_packet.raw_pdu).unwrap();
         assert_eq!(fd_pdu.file_data(), &rand_data[0..first_chunk.len()]);
         let expected_id = tb.handler.transaction_id().unwrap();
-        assert!(
-            tb.handler
-                .cancel_request(&mut cfdp_user, &expected_id)
-                .expect("cancellation failed")
-        );
+        assert!(tb
+            .handler
+            .cancel_request(&mut cfdp_user, &expected_id)
+            .expect("cancellation failed"));
         assert_eq!(tb.handler.state(), State::Idle);
         assert_eq!(tb.handler.step(), TransactionStep::Idle);
         let next_packet = tb.get_next_sent_pdu().unwrap();
