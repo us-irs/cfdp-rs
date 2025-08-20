@@ -1002,7 +1002,11 @@ pub mod alloc_mod {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use core::cell::RefCell;
+    use core::{
+        cell::{Cell, RefCell},
+        sync::atomic::AtomicBool,
+    };
+    use std::sync::Arc;
 
     use alloc::{collections::VecDeque, string::String, vec::Vec};
     use spacepackets::{
@@ -1026,6 +1030,99 @@ pub(crate) mod tests {
 
     pub const LOCAL_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(1);
     pub const REMOTE_ID: UnsignedByteFieldU16 = UnsignedByteFieldU16::new(2);
+
+    // This test structure allows to precisely control the expiry of CFDP timers.
+    #[derive(Debug, Default, Clone)]
+    pub(crate) struct TimerExpiryControl {
+        pub(crate) check_limit: Arc<AtomicBool>,
+        pub(crate) positive_ack: Arc<AtomicBool>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct TestCheckTimer {
+        counter: Cell<u32>,
+        context: TimerContext,
+        expiry_control: TimerExpiryControl,
+    }
+
+    impl CountdownProvider for TestCheckTimer {
+        fn has_expired(&self) -> bool {
+            match self.context {
+                TimerContext::CheckLimit {
+                    local_id: _,
+                    remote_id: _,
+                    entity_type: _,
+                } => self
+                    .expiry_control
+                    .check_limit
+                    .load(core::sync::atomic::Ordering::Acquire),
+                TimerContext::PositiveAck { expiry_time: _ } => self
+                    .expiry_control
+                    .positive_ack
+                    .load(core::sync::atomic::Ordering::Acquire),
+                TimerContext::NakActivity { expiry_time: _ } => todo!(),
+            }
+        }
+        fn reset(&mut self) {
+            match self.context {
+                TimerContext::CheckLimit {
+                    local_id: _,
+                    remote_id: _,
+                    entity_type: _,
+                } => {}
+                TimerContext::NakActivity { expiry_time: _ } => {
+                    self.expiry_control
+                        .check_limit
+                        .store(false, core::sync::atomic::Ordering::Release);
+                }
+                TimerContext::PositiveAck { expiry_time: _ } => self
+                    .expiry_control
+                    .positive_ack
+                    .store(false, core::sync::atomic::Ordering::Release),
+            }
+            self.counter.set(0);
+        }
+    }
+
+    impl TestCheckTimer {
+        pub fn new(context: TimerContext, expiry_control: &TimerExpiryControl) -> Self {
+            Self {
+                counter: Cell::new(0),
+                context,
+                expiry_control: expiry_control.clone(),
+            }
+        }
+    }
+
+    pub(crate) struct TestCheckTimerCreator {
+        expiry_control: TimerExpiryControl,
+    }
+
+    impl TestCheckTimerCreator {
+        pub fn new(expiry_control: &TimerExpiryControl) -> Self {
+            Self {
+                expiry_control: expiry_control.clone(),
+            }
+        }
+    }
+
+    impl TimerCreatorProvider for TestCheckTimerCreator {
+        type Countdown = TestCheckTimer;
+
+        fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
+            match timer_context {
+                TimerContext::CheckLimit { .. } => {
+                    TestCheckTimer::new(timer_context, &self.expiry_control)
+                }
+                TimerContext::PositiveAck { expiry_time: _ } => {
+                    TestCheckTimer::new(timer_context, &self.expiry_control)
+                }
+                _ => {
+                    panic!("invalid check timer creator, can only be used for check limit handling")
+                }
+            }
+        }
+    }
 
     pub struct FileSegmentRecvdParamsNoSegMetadata {
         #[allow(dead_code)]

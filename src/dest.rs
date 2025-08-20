@@ -990,7 +990,6 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use core::{cell::Cell, sync::atomic::AtomicBool};
     #[allow(unused_imports)]
     use std::println;
     use std::{
@@ -999,7 +998,7 @@ mod tests {
         string::String,
     };
 
-    use alloc::{sync::Arc, vec::Vec};
+    use alloc::vec::Vec;
     use rand::Rng;
     use spacepackets::{
         cfdp::{
@@ -1011,67 +1010,15 @@ mod tests {
     };
 
     use crate::{
-        CRC_32, CountdownProvider, FaultHandler, IndicationConfig, PduRawWithInfo,
-        StdRemoteEntityConfigProvider, TimerCreatorProvider,
+        CRC_32, FaultHandler, IndicationConfig, PduRawWithInfo, StdRemoteEntityConfigProvider,
         filestore::NativeFilestore,
         tests::{
-            LOCAL_ID, REMOTE_ID, SentPdu, TestCfdpSender, TestCfdpUser, TestFaultHandler,
-            basic_remote_cfg_table,
+            LOCAL_ID, REMOTE_ID, SentPdu, TestCfdpSender, TestCfdpUser, TestCheckTimer,
+            TestCheckTimerCreator, TestFaultHandler, TimerExpiryControl, basic_remote_cfg_table,
         },
     };
 
     use super::*;
-
-    #[derive(Debug)]
-    struct TestCheckTimer {
-        counter: Cell<u32>,
-        expired: Arc<AtomicBool>,
-    }
-
-    impl CountdownProvider for TestCheckTimer {
-        fn has_expired(&self) -> bool {
-            self.expired.load(core::sync::atomic::Ordering::Relaxed)
-        }
-        fn reset(&mut self) {
-            self.counter.set(0);
-        }
-    }
-
-    impl TestCheckTimer {
-        pub fn new(expired_flag: Arc<AtomicBool>) -> Self {
-            Self {
-                counter: Cell::new(0),
-                expired: expired_flag,
-            }
-        }
-    }
-
-    struct TestCheckTimerCreator {
-        check_limit_expired_flag: Arc<AtomicBool>,
-    }
-
-    impl TestCheckTimerCreator {
-        pub fn new(expired_flag: Arc<AtomicBool>) -> Self {
-            Self {
-                check_limit_expired_flag: expired_flag,
-            }
-        }
-    }
-
-    impl TimerCreatorProvider for TestCheckTimerCreator {
-        type Countdown = TestCheckTimer;
-
-        fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
-            match timer_context {
-                TimerContext::CheckLimit { .. } => {
-                    TestCheckTimer::new(self.check_limit_expired_flag.clone())
-                }
-                _ => {
-                    panic!("invalid check timer creator, can only be used for check limit handling")
-                }
-            }
-        }
-    }
 
     type TestDestHandler = DestinationHandler<
         TestCfdpSender,
@@ -1083,7 +1030,7 @@ mod tests {
     >;
 
     struct DestHandlerTestbench {
-        check_timer_expired: Arc<AtomicBool>,
+        expiry_control: TimerExpiryControl,
         handler: TestDestHandler,
         src_path: PathBuf,
         dest_path: PathBuf,
@@ -1110,12 +1057,11 @@ mod tests {
             src_path: PathBuf,
             dest_path: PathBuf,
         ) -> Self {
-            let check_timer_expired = Arc::new(AtomicBool::new(false));
+            let expiry_control = TimerExpiryControl::default();
             let test_sender = TestCfdpSender::default();
-            let dest_handler =
-                default_dest_handler(fault_handler, test_sender, check_timer_expired.clone());
+            let dest_handler = default_dest_handler(fault_handler, test_sender, &expiry_control);
             let handler = Self {
-                check_timer_expired,
+                expiry_control,
                 handler: dest_handler,
                 src_path,
                 closure_requested,
@@ -1157,8 +1103,9 @@ mod tests {
         }
 
         fn set_check_timer_expired(&mut self) {
-            self.check_timer_expired
-                .store(true, core::sync::atomic::Ordering::Relaxed);
+            self.expiry_control
+                .check_limit
+                .store(true, core::sync::atomic::Ordering::Release);
         }
 
         fn test_user_from_cached_paths(&self, expected_file_size: u64) -> TestCfdpUser {
@@ -1301,7 +1248,7 @@ mod tests {
     fn default_dest_handler(
         test_fault_handler: TestFaultHandler,
         test_packet_sender: TestCfdpSender,
-        check_timer_expired: Arc<AtomicBool>,
+        expiry_control: &TimerExpiryControl,
     ) -> TestDestHandler {
         let local_entity_cfg = LocalEntityConfig {
             id: REMOTE_ID.into(),
@@ -1314,7 +1261,7 @@ mod tests {
             test_packet_sender,
             NativeFilestore::default(),
             basic_remote_cfg_table(LOCAL_ID, 1024, true),
-            TestCheckTimerCreator::new(check_timer_expired),
+            TestCheckTimerCreator::new(expiry_control),
         )
     }
 
@@ -1372,7 +1319,8 @@ mod tests {
     fn test_basic() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let dest_handler = default_dest_handler(fault_handler, test_sender, Arc::default());
+        let dest_handler =
+            default_dest_handler(fault_handler, test_sender, &TimerExpiryControl::default());
         assert!(dest_handler.transmission_mode().is_none());
         assert!(
             dest_handler
@@ -1391,7 +1339,8 @@ mod tests {
     fn test_cancelling_idle_fsm() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
-        let mut dest_handler = default_dest_handler(fault_handler, test_sender, Arc::default());
+        let mut dest_handler =
+            default_dest_handler(fault_handler, test_sender, &TimerExpiryControl::default());
         assert!(!dest_handler.cancel_request(&TransactionId::new(
             UnsignedByteFieldU8::new(0).into(),
             UnsignedByteFieldU8::new(0).into()

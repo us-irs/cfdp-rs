@@ -106,6 +106,9 @@ pub struct FileParams {
     pub metadata_only: bool,
     pub file_size: u64,
     pub empty_file: bool,
+    /// The checksum is cached to avoid expensive re-calculation when the EOF PDU needs to be
+    /// re-sent.
+    pub checksum_completed_file: Option<u32>,
 }
 
 // Explicit choice to put all simple internal fields into Cells.
@@ -639,7 +642,7 @@ impl<
             sent_packets += 1;
         }
         if self.step() == TransactionStep::WaitingForEofAck {
-            self.handle_waiting_for_ack_pdu(user);
+            self.handle_waiting_for_ack_pdu(user)?;
         }
         if self.step() == TransactionStep::WaitingForFinished {
             self.handle_waiting_for_finished_pdu(user)?;
@@ -651,11 +654,14 @@ impl<
         Ok(sent_packets)
     }
 
-    fn handle_waiting_for_ack_pdu(&mut self, user: &mut impl CfdpUser) {
-        self.handle_positive_ack_procedures(user);
+    fn handle_waiting_for_ack_pdu(&mut self, user: &mut impl CfdpUser) -> Result<(), SourceError> {
+        self.handle_positive_ack_procedures(user)
     }
 
-    fn handle_positive_ack_procedures(&mut self, user: &mut impl CfdpUser) {
+    fn handle_positive_ack_procedures(
+        &mut self,
+        user: &mut impl CfdpUser,
+    ) -> Result<(), SourceError> {
         let mut positive_ack_limit_reached = false;
         if let Some(positive_ack_params) = self.positive_ack_params.borrow_mut().as_mut() {
             if positive_ack_params.ack_timer.has_expired() {
@@ -668,17 +674,21 @@ impl<
                     .positive_ack_timer_expiration_limit;
                 if positive_ack_params.ack_counter + 1 >= ack_timer_exp_limit {
                     positive_ack_limit_reached = true;
+                } else {
+                    positive_ack_params.ack_timer.reset();
+                    positive_ack_params.ack_counter += 1;
+                    self.prepare_and_send_eof_pdu(
+                        user,
+                        self.file_params.checksum_completed_file.unwrap(),
+                    )?;
                 }
-            }
-            if !positive_ack_limit_reached {
-                positive_ack_params.ack_timer.reset();
-                positive_ack_params.ack_counter += 1;
             }
         }
         if positive_ack_limit_reached {
             // TODO: Is it a good idea to ignore this result?
             let _ = self.declare_fault(user, ConditionCode::PositiveAckLimitReached);
         }
+        Ok(())
     }
 
     fn handle_retransmission(&mut self, nak_pdu: &NakPduReader) -> Result<(), SourceError> {
@@ -728,6 +738,7 @@ impl<
             self.file_params.file_size,
             &mut self.pdu_and_cksum_buffer.borrow_mut(),
         )?;
+        self.file_params.checksum_completed_file = Some(checksum);
         self.prepare_and_send_eof_pdu(user, checksum)?;
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
             if self.tstate_ref().closure_requested.get() {
@@ -1308,7 +1319,7 @@ mod tests {
             cfdp_user: &mut TestCfdpUser,
             with_closure: bool,
             file_data: Vec<u8>,
-        ) -> (PduHeader, u32) {
+        ) -> (TransferInfo, u32) {
             let mut digest = CRC_32.digest();
             digest.update(&file_data);
             let checksum = digest.finalize();
@@ -1319,7 +1330,7 @@ mod tests {
                 REMOTE_ID.into(),
                 &self.srcfile,
                 &self.destfile,
-                Some(TransmissionMode::Unacknowledged),
+                Some(self.transmission_mode),
                 Some(with_closure),
             )
             .expect("creating put request failed");
@@ -1349,7 +1360,7 @@ mod tests {
                 cfdp_user.expected_file_size,
                 checksum,
             );
-            (transaction_info.pdu_header, fd_pdus)
+            (transaction_info, fd_pdus)
         }
 
         fn common_file_transfer_init_with_metadata_check(
@@ -1434,6 +1445,44 @@ mod tests {
             assert!(fd_pdu.segment_metadata().is_none());
         }
 
+        fn acknowledge_eof_pdu(
+            &mut self,
+            cfdp_user: &mut impl CfdpUser,
+            transaction_info: &TransferInfo,
+        ) {
+            let ack_pdu = AckPdu::new(
+                transaction_info.pdu_header,
+                FileDirectiveType::EofPdu,
+                ConditionCode::NoError,
+                TransactionStatus::Active,
+            )
+            .expect("creating ACK PDU failed");
+            let ack_pdu_vec = ack_pdu.to_vec().unwrap();
+            let packet_info = PduRawWithInfo::new(&ack_pdu_vec).unwrap();
+            self.handler
+                .state_machine(cfdp_user, Some(&packet_info))
+                .expect("state machine failed");
+        }
+
+        fn common_finished_pdu_ack_check(&mut self) {
+            assert!(!self.pdu_queue_empty());
+            let next_pdu = self.get_next_sent_pdu().unwrap();
+            assert!(self.pdu_queue_empty());
+            assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
+            assert_eq!(
+                next_pdu.file_directive_type,
+                Some(FileDirectiveType::AckPdu)
+            );
+            let ack_pdu = AckPdu::from_bytes(&next_pdu.raw_pdu).unwrap();
+            self.common_pdu_check_for_file_transfer(ack_pdu.pdu_header(), CrcFlag::NoCrc);
+            assert_eq!(ack_pdu.condition_code(), ConditionCode::NoError);
+            assert_eq!(
+                ack_pdu.directive_code_of_acked_pdu(),
+                FileDirectiveType::FinishedPdu
+            );
+            assert_eq!(ack_pdu.transaction_status(), TransactionStatus::Active);
+        }
+
         fn common_eof_pdu_check(
             &mut self,
             cfdp_user: &mut TestCfdpUser,
@@ -1482,7 +1531,7 @@ mod tests {
             &mut self,
             cfdp_user: &mut TestCfdpUser,
             with_closure: bool,
-        ) -> PduHeader {
+        ) -> TransferInfo {
             let mut file = OpenOptions::new()
                 .write(true)
                 .open(&self.srcfile)
@@ -1491,19 +1540,19 @@ mod tests {
             file.write_all(content_str.as_bytes())
                 .expect("writing file content failed");
             drop(file);
-            let (pdu_header, fd_pdus) = self.generic_file_transfer(
+            let (transfer_info, fd_pdus) = self.generic_file_transfer(
                 cfdp_user,
                 with_closure,
                 content_str.as_bytes().to_vec(),
             );
             assert_eq!(fd_pdus, 1);
-            pdu_header
+            transfer_info
         }
 
         // Finish handling: Simulate completion from the destination side by insert finished PDU.
-        fn finish_handling(&mut self, user: &mut TestCfdpUser, pdu_header: PduHeader) {
+        fn finish_handling(&mut self, user: &mut TestCfdpUser, transfer_info: &TransferInfo) {
             let finished_pdu = FinishedPduCreator::new_default(
-                pdu_header,
+                transfer_info.pdu_header,
                 DeliveryCode::Complete,
                 FileStatus::Retained,
             );
@@ -1601,20 +1650,9 @@ mod tests {
             CRC_32.digest().finalize(),
         );
 
-        let ack_pdu = AckPdu::new(
-            transaction_info.pdu_header,
-            FileDirectiveType::EofPdu,
-            ConditionCode::NoError,
-            TransactionStatus::Active,
-        )
-        .expect("creating ACK PDU failed");
-        let ack_pdu_vec = ack_pdu.to_vec().unwrap();
-        let packet_info = PduRawWithInfo::new(&ack_pdu_vec).unwrap();
-        tb.handler
-            .state_machine(&mut cfdp_user, Some(&packet_info))
-            .expect("state machine failed");
-        tb.finish_handling(&mut cfdp_user, transaction_info.pdu_header);
-        // TODO: Check ACK PDU sent for finished PDU.
+        tb.acknowledge_eof_pdu(&mut cfdp_user, &transaction_info);
+        tb.finish_handling(&mut cfdp_user, &transaction_info);
+        tb.common_finished_pdu_ack_check();
     }
 
     #[test]
@@ -1633,6 +1671,24 @@ mod tests {
     }
 
     #[test]
+    fn test_tiny_file_transfer_acked() {
+        let fault_handler = TestFaultHandler::default();
+        let test_sender = TestCfdpSender::default();
+        let mut cfdp_user = TestCfdpUser::default();
+        let mut tb = SourceHandlerTestbench::new(
+            TransmissionMode::Acknowledged,
+            false,
+            fault_handler,
+            test_sender,
+            512,
+        );
+        let transfer_info = tb.common_tiny_file_transfer(&mut cfdp_user, false);
+        tb.acknowledge_eof_pdu(&mut cfdp_user, &transfer_info);
+        tb.finish_handling(&mut cfdp_user, &transfer_info);
+        tb.common_finished_pdu_ack_check();
+    }
+
+    #[test]
     fn test_tiny_file_transfer_not_acked_with_closure() {
         let fault_handler = TestFaultHandler::default();
         let test_sender = TestCfdpSender::default();
@@ -1644,8 +1700,8 @@ mod tests {
             512,
         );
         let mut cfdp_user = TestCfdpUser::default();
-        let pdu_header = tb.common_tiny_file_transfer(&mut cfdp_user, true);
-        tb.finish_handling(&mut cfdp_user, pdu_header)
+        let transfer_info = tb.common_tiny_file_transfer(&mut cfdp_user, true);
+        tb.finish_handling(&mut cfdp_user, &transfer_info)
     }
 
     #[test]
@@ -1694,11 +1750,13 @@ mod tests {
         file.write_all(&rand_data)
             .expect("writing file content failed");
         drop(file);
-        let (pdu_header, fd_pdus) =
+        let (transfer_info, fd_pdus) =
             tb.generic_file_transfer(&mut cfdp_user, true, rand_data.to_vec());
         assert_eq!(fd_pdus, 2);
-        tb.finish_handling(&mut cfdp_user, pdu_header)
+        tb.finish_handling(&mut cfdp_user, &transfer_info)
     }
+
+    // TODO: Two segment file transfer acked.
 
     #[test]
     fn test_empty_file_transfer_not_acked_with_closure() {
@@ -1729,7 +1787,7 @@ mod tests {
             filesize,
             CRC_32.digest().finalize(),
         );
-        tb.finish_handling(&mut cfdp_user, transaction_info.pdu_header)
+        tb.finish_handling(&mut cfdp_user, &transaction_info)
     }
 
     #[test]
