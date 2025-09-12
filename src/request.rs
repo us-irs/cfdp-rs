@@ -1,7 +1,7 @@
 use spacepackets::{
     cfdp::{
-        tlv::{GenericTlv, Tlv, TlvType},
         SegmentationControl, TransmissionMode,
+        tlv::{GenericTlv, Tlv, TlvType},
     },
     util::UnsignedByteField,
 };
@@ -233,8 +233,8 @@ pub mod alloc_mod {
     use super::*;
     use alloc::string::ToString;
     use spacepackets::{
-        cfdp::tlv::{msg_to_user::MsgToUserTlv, ReadableTlv, TlvOwned, WritableTlv},
         ByteConversionError,
+        cfdp::tlv::{ReadableTlv, TlvOwned, WritableTlv, msg_to_user::MsgToUserTlv},
     };
 
     /// Owned variant of [PutRequest] with no lifetimes which is also [Clone]able.
@@ -557,7 +557,7 @@ mod tests {
     use std::string::String;
 
     use spacepackets::{
-        cfdp::tlv::{msg_to_user::MsgToUserTlv, ReadableTlv},
+        cfdp::tlv::{ReadableTlv, msg_to_user::MsgToUserTlv},
         util::UbfU16,
     };
 

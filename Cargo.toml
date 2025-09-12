@@ -1,8 +1,8 @@
 [package]
 name = "cfdp-rs"
 version = "0.2.0"
-edition = "2021"
-rust-version = "1.81.0"
+edition = "2024"
+rust-version = "1.85.0"
 authors = ["Robin Mueller <muellerr@irs.uni-stuttgart.de>"]
 description = "High level CCSDS File Delivery Protocol components"
 homepage = "https://egit.irs.uni-stuttgart.de/rust/cfdp"
@@ -20,7 +20,7 @@ crc = "3"
 smallvec = "1"
 derive-new = ">=0.6, <=0.7"
 hashbrown = { version = ">=0.14, <=0.15", optional = true }
-spacepackets = { version = "0.15", default-features = false }
+spacepackets = { git = "https://egit.irs.uni-stuttgart.de/rust/spacepackets.git", version = "0.16", default-features = false }
 thiserror = { version = "2", default-features = false }
 serde = { version = "1", optional = true }
 defmt  = { version = "1", optional = true }

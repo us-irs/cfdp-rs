@@ -1,5 +1,5 @@
-use spacepackets::cfdp::ChecksumType;
 use spacepackets::ByteConversionError;
+use spacepackets::cfdp::ChecksumType;
 #[cfg(feature = "std")]
 pub use std_mod::*;
 
@@ -375,9 +375,11 @@ mod tests {
             .create_dir(dir_path.to_str().expect("getting str for file failed"))
             .unwrap();
         assert!(NATIVE_FS.exists(dir_path.to_str().unwrap()).unwrap());
-        assert!(NATIVE_FS
-            .is_dir(dir_path.as_path().to_str().unwrap())
-            .unwrap());
+        assert!(
+            NATIVE_FS
+                .is_dir(dir_path.as_path().to_str().unwrap())
+                .unwrap()
+        );
     }
 
     #[test]
