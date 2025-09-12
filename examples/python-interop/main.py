@@ -16,11 +16,11 @@ from typing import Any, Dict, List, Tuple, Optional
 from multiprocessing import Queue
 from queue import Empty
 
-from cfdppy.handler import DestHandler, RemoteEntityCfgTable, SourceHandler
+from cfdppy.handler import DestHandler, RemoteEntityConfigTable, SourceHandler
 from cfdppy.exceptions import InvalidDestinationId, SourceFileDoesNotExist
 from cfdppy import (
     CfdpUserBase,
-    LocalEntityCfg,
+    LocalEntityConfig,
     PacketDestination,
     PutRequest,
     TransactionId,
@@ -31,8 +31,8 @@ from cfdppy.mib import (
     CheckTimerProvider,
     DefaultFaultHandlerBase,
     EntityType,
-    IndicationCfg,
-    RemoteEntityCfg,
+    IndicationConfig,
+    RemoteEntityConfig,
 )
 from cfdppy.user import (
     FileSegmentRecvdParams,
@@ -58,7 +58,7 @@ from spacepackets.util import ByteFieldU16, UnsignedByteField
 PYTHON_ENTITY_ID = ByteFieldU16(1)
 RUST_ENTITY_ID = ByteFieldU16(2)
 # Enable all indications for both local and remote entity.
-INDICATION_CFG = IndicationCfg()
+INDICATION_CFG = IndicationConfig()
 
 BASE_STR_SRC = "PY SRC"
 BASE_STR_DEST = "PY DEST"
@@ -79,7 +79,7 @@ DEST_ENTITY_QUEUE = Queue()
 # be sent by the UDP server.
 TM_QUEUE = Queue()
 
-REMOTE_CFG_OF_PY_ENTITY = RemoteEntityCfg(
+REMOTE_CFG_OF_PY_ENTITY = RemoteEntityConfig(
     entity_id=PYTHON_ENTITY_ID,
     max_packet_len=MAX_PACKET_LEN,
     max_file_segment_len=FILE_SEGMENT_SIZE,
@@ -585,7 +585,7 @@ def main():
 
     logging.basicConfig(level=logging_level)
 
-    remote_cfg_table = RemoteEntityCfgTable()
+    remote_cfg_table = RemoteEntityConfigTable()
     remote_cfg_table.add_config(REMOTE_CFG_OF_REMOTE_ENTITY)
 
     src_fault_handler = CfdpFaultHandler(BASE_STR_SRC)
@@ -594,7 +594,7 @@ def main():
     src_user = CfdpUser(BASE_STR_SRC, PUT_REQ_QUEUE)
     check_timer_provider = CustomCheckTimerProvider()
     source_handler = SourceHandler(
-        cfg=LocalEntityCfg(PYTHON_ENTITY_ID, INDICATION_CFG, src_fault_handler),
+        cfg=LocalEntityConfig(PYTHON_ENTITY_ID, INDICATION_CFG, src_fault_handler),
         seq_num_provider=src_seq_count_provider,
         remote_cfg_table=remote_cfg_table,
         user=src_user,
@@ -614,7 +614,7 @@ def main():
     dest_fault_handler = CfdpFaultHandler(BASE_STR_DEST)
     dest_user = CfdpUser(BASE_STR_DEST, PUT_REQ_QUEUE)
     dest_handler = DestHandler(
-        cfg=LocalEntityCfg(PYTHON_ENTITY_ID, INDICATION_CFG, dest_fault_handler),
+        cfg=LocalEntityConfig(PYTHON_ENTITY_ID, INDICATION_CFG, dest_fault_handler),
         user=dest_user,
         remote_cfg_table=remote_cfg_table,
         check_timer_provider=check_timer_provider,

@@ -17,11 +17,10 @@ The underlying base packet library used to generate the packets to be sent is th
 `cfdp-rs` currently supports following high-level features:
 
 - Unacknowledged (class 1) file transfers for both source and destination side.
-- Acknowledged (class 2) file transfers for the source side.
+- Acknowledged (class 2) file transfers for both source side and destination side.
 
 The following features have not been implemented yet. PRs or notifications for demand are welcome!
 
-- Acknowledged (class 2) file transfers for the destination side.
 - Suspending transfers
 - Inactivity handling
 - Start and end of transmission and reception opportunity handling
