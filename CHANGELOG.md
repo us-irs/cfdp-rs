@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 # [unreleased]
 
+# [v0.3.0] 2025-09-??
+
 - Bumped `spacepackets` to v0.16
 - Bumped `defmt` to v1
 
@@ -26,3 +28,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 # [v0.1.0] 2024-09-11
 
 Initial release
+
+[unreleased]: https://egit.irs.uni-stuttgart.de/rust/cfdp/compare/v0.3.0...HEAD
+[v0.3.0]: https://egit.irs.uni-stuttgart.de/rust/cfdp/compare/v0.2.0...v0.3.0
+[v0.2.0]: https://egit.irs.uni-stuttgart.de/rust/cfdp/compare/v0.1.0...v0.2.0
