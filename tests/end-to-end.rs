@@ -17,7 +17,7 @@ use cfdp::{
     dest::DestinationHandler,
     filestore::NativeFilestore,
     lost_segments::LostSegmentsList,
-    request::{PutRequestOwned, StaticPutRequestCacher},
+    request::PutRequestOwned,
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
 };
@@ -167,7 +167,6 @@ fn end_to_end_test(transmission_mode: TransmissionMode, with_closure: bool) {
     );
     let (source_tx, source_rx) = mpsc::channel::<PduOwnedWithInfo>();
     let (dest_tx, dest_rx) = mpsc::channel::<PduOwnedWithInfo>();
-    let put_request_cacher = StaticPutRequestCacher::new(2048);
     let remote_cfg_of_dest = RemoteEntityConfig::new_with_default_values(
         REMOTE_ID.into(),
         1024,
@@ -181,8 +180,6 @@ fn end_to_end_test(transmission_mode: TransmissionMode, with_closure: bool) {
         local_cfg_source,
         source_tx,
         NativeFilestore::default(),
-        put_request_cacher,
-        2048,
         remote_cfg_of_dest,
         StdTimerCreator::default(),
         seq_count_provider,
@@ -204,7 +201,6 @@ fn end_to_end_test(transmission_mode: TransmissionMode, with_closure: bool) {
     );
     let mut dest_handler = DestinationHandler::new(
         local_cfg_dest,
-        1024,
         dest_tx,
         NativeFilestore::default(),
         remote_cfg_of_source,

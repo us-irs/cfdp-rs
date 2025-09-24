@@ -1,7 +1,10 @@
+use core::str::Utf8Error;
+
 use spacepackets::{
+    ByteConversionError,
     cfdp::{
         SegmentationControl, TransmissionMode,
-        tlv::{GenericTlv, Tlv, TlvType},
+        tlv::{GenericTlv, ReadableTlv as _, Tlv, TlvType, WritableTlv as _},
     },
     util::UnsignedByteField,
 };
@@ -226,16 +229,171 @@ pub fn generic_tlv_list_type_check<TlvProvider: GenericTlv>(
     true
 }
 
+pub struct StaticPutRequestFields {
+    pub destination_id: UnsignedByteField,
+    /// Static buffer to store source file path.
+    pub source_file_buf: [u8; u8::MAX as usize],
+    /// Current source path length.
+    pub source_file_len: usize,
+    /// Static buffer to store dest file path.
+    pub dest_file_buf: [u8; u8::MAX as usize],
+    /// Current destination path length.
+    pub dest_file_len: usize,
+    pub trans_mode: Option<TransmissionMode>,
+    pub closure_requested: Option<bool>,
+    pub seg_ctrl: Option<SegmentationControl>,
+}
+
+impl Default for StaticPutRequestFields {
+    fn default() -> Self {
+        Self {
+            destination_id: UnsignedByteField::new(0, 0),
+            source_file_buf: [0; u8::MAX as usize],
+            source_file_len: Default::default(),
+            dest_file_buf: [0; u8::MAX as usize],
+            dest_file_len: Default::default(),
+            trans_mode: Default::default(),
+            closure_requested: Default::default(),
+            seg_ctrl: Default::default(),
+        }
+    }
+}
+
+impl StaticPutRequestFields {
+    pub fn clear(&mut self) {
+        self.destination_id = UnsignedByteField::new(0, 0);
+        self.source_file_len = 0;
+        self.dest_file_len = 0;
+        self.trans_mode = None;
+        self.closure_requested = None;
+        self.seg_ctrl = None;
+    }
+}
+
+/// This is a put request cache structure which can be used to cache [ReadablePutRequest]s
+/// without requiring run-time allocation. The user must specify the static buffer sizes used
+/// to store TLVs or list of TLVs.
+pub struct StaticPutRequestCacher<const BUF_SIZE: usize> {
+    pub static_fields: StaticPutRequestFields,
+    opts_buf: [u8; BUF_SIZE],
+    opts_len: usize,
+}
+
+impl<const BUF_SIZE: usize> Default for StaticPutRequestCacher<BUF_SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const BUF_SIZE: usize> StaticPutRequestCacher<BUF_SIZE> {
+    pub fn new() -> Self {
+        Self {
+            static_fields: StaticPutRequestFields::default(),
+            opts_buf: [0; BUF_SIZE],
+            opts_len: 0,
+        }
+    }
+
+    pub fn set(
+        &mut self,
+        put_request: &impl ReadablePutRequest,
+    ) -> Result<(), ByteConversionError> {
+        self.static_fields.destination_id = put_request.destination_id();
+        if let Some(source_file) = put_request.source_file() {
+            if source_file.len() > u8::MAX as usize {
+                return Err(ByteConversionError::ToSliceTooSmall {
+                    found: self.static_fields.source_file_buf.len(),
+                    expected: source_file.len(),
+                });
+            }
+            self.static_fields.source_file_buf[..source_file.len()]
+                .copy_from_slice(source_file.as_bytes());
+            self.static_fields.source_file_len = source_file.len();
+        }
+        if let Some(dest_file) = put_request.dest_file() {
+            if dest_file.len() > u8::MAX as usize {
+                return Err(ByteConversionError::ToSliceTooSmall {
+                    found: self.static_fields.source_file_buf.len(),
+                    expected: dest_file.len(),
+                });
+            }
+            self.static_fields.dest_file_buf[..dest_file.len()]
+                .copy_from_slice(dest_file.as_bytes());
+            self.static_fields.dest_file_len = dest_file.len();
+        }
+        self.static_fields.trans_mode = put_request.trans_mode();
+        self.static_fields.closure_requested = put_request.closure_requested();
+        self.static_fields.seg_ctrl = put_request.seg_ctrl();
+        let mut current_idx = 0;
+        let mut store_tlv = |tlv: &Tlv| {
+            if current_idx + tlv.len_full() > self.opts_buf.len() {
+                return Err(ByteConversionError::ToSliceTooSmall {
+                    found: self.opts_buf.len(),
+                    expected: current_idx + tlv.len_full(),
+                });
+            }
+            // We checked the buffer lengths, so this should never fail.
+            tlv.write_to_bytes(&mut self.opts_buf[current_idx..current_idx + tlv.len_full()])
+                .unwrap();
+            current_idx += tlv.len_full();
+            Ok(())
+        };
+        if let Some(fs_req) = put_request.fs_requests() {
+            for fs_req in fs_req {
+                store_tlv(&fs_req)?;
+            }
+        }
+        if let Some(msgs_to_user) = put_request.msgs_to_user() {
+            for msg_to_user in msgs_to_user {
+                store_tlv(&msg_to_user)?;
+            }
+        }
+        self.opts_len = current_idx;
+        Ok(())
+    }
+
+    pub fn has_source_file(&self) -> bool {
+        self.static_fields.source_file_len > 0
+    }
+
+    pub fn has_dest_file(&self) -> bool {
+        self.static_fields.dest_file_len > 0
+    }
+
+    pub fn source_file(&self) -> Result<&str, Utf8Error> {
+        core::str::from_utf8(
+            &self.static_fields.source_file_buf[0..self.static_fields.source_file_len],
+        )
+    }
+
+    pub fn dest_file(&self) -> Result<&str, Utf8Error> {
+        core::str::from_utf8(&self.static_fields.dest_file_buf[0..self.static_fields.dest_file_len])
+    }
+
+    pub fn opts_len(&self) -> usize {
+        self.opts_len
+    }
+
+    pub fn opts_slice(&self) -> &[u8] {
+        &self.opts_buf[0..self.opts_len]
+    }
+
+    /// This clears the cacher structure. This is a cheap operation because it only
+    /// sets [Option]al values to [None] and the length of stores TLVs to 0.
+    ///
+    /// Please note that this method will not set the values in the buffer to 0.
+    pub fn clear(&mut self) {
+        self.static_fields.clear();
+        self.opts_len = 0;
+    }
+}
+
 #[cfg(feature = "alloc")]
 pub mod alloc_mod {
-    use core::str::Utf8Error;
 
     use super::*;
     use alloc::string::ToString;
-    use spacepackets::{
-        ByteConversionError,
-        cfdp::tlv::{ReadableTlv, TlvOwned, WritableTlv, msg_to_user::MsgToUserTlv},
-    };
+    use spacepackets::cfdp::tlv::{TlvOwned, msg_to_user::MsgToUserTlv};
 
     /// Owned variant of [PutRequest] with no lifetimes which is also [Clone]able.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,161 +553,6 @@ pub mod alloc_mod {
             None
         }
     }
-
-    pub struct StaticPutRequestFields {
-        pub destination_id: UnsignedByteField,
-        /// Static buffer to store source file path.
-        pub source_file_buf: [u8; u8::MAX as usize],
-        /// Current source path length.
-        pub source_file_len: usize,
-        /// Static buffer to store dest file path.
-        pub dest_file_buf: [u8; u8::MAX as usize],
-        /// Current destination path length.
-        pub dest_file_len: usize,
-        pub trans_mode: Option<TransmissionMode>,
-        pub closure_requested: Option<bool>,
-        pub seg_ctrl: Option<SegmentationControl>,
-    }
-
-    impl Default for StaticPutRequestFields {
-        fn default() -> Self {
-            Self {
-                destination_id: UnsignedByteField::new(0, 0),
-                source_file_buf: [0; u8::MAX as usize],
-                source_file_len: Default::default(),
-                dest_file_buf: [0; u8::MAX as usize],
-                dest_file_len: Default::default(),
-                trans_mode: Default::default(),
-                closure_requested: Default::default(),
-                seg_ctrl: Default::default(),
-            }
-        }
-    }
-
-    impl StaticPutRequestFields {
-        pub fn clear(&mut self) {
-            self.destination_id = UnsignedByteField::new(0, 0);
-            self.source_file_len = 0;
-            self.dest_file_len = 0;
-            self.trans_mode = None;
-            self.closure_requested = None;
-            self.seg_ctrl = None;
-        }
-    }
-
-    /// This is a put request cache structure which can be used to cache [ReadablePutRequest]s
-    /// without requiring run-time allocation. The user must specify the static buffer sizes used
-    /// to store TLVs or list of TLVs.
-    pub struct StaticPutRequestCacher {
-        pub static_fields: StaticPutRequestFields,
-        opts_buf: alloc::vec::Vec<u8>,
-        opts_len: usize, // fs_request_start_end_pos: Option<(usize, usize)>
-    }
-
-    impl StaticPutRequestCacher {
-        pub fn new(max_len_opts_buf: usize) -> Self {
-            Self {
-                static_fields: StaticPutRequestFields::default(),
-                opts_buf: alloc::vec![0; max_len_opts_buf],
-                opts_len: 0,
-            }
-        }
-
-        pub fn set(
-            &mut self,
-            put_request: &impl ReadablePutRequest,
-        ) -> Result<(), ByteConversionError> {
-            self.static_fields.destination_id = put_request.destination_id();
-            if let Some(source_file) = put_request.source_file() {
-                if source_file.len() > u8::MAX as usize {
-                    return Err(ByteConversionError::ToSliceTooSmall {
-                        found: self.static_fields.source_file_buf.len(),
-                        expected: source_file.len(),
-                    });
-                }
-                self.static_fields.source_file_buf[..source_file.len()]
-                    .copy_from_slice(source_file.as_bytes());
-                self.static_fields.source_file_len = source_file.len();
-            }
-            if let Some(dest_file) = put_request.dest_file() {
-                if dest_file.len() > u8::MAX as usize {
-                    return Err(ByteConversionError::ToSliceTooSmall {
-                        found: self.static_fields.source_file_buf.len(),
-                        expected: dest_file.len(),
-                    });
-                }
-                self.static_fields.dest_file_buf[..dest_file.len()]
-                    .copy_from_slice(dest_file.as_bytes());
-                self.static_fields.dest_file_len = dest_file.len();
-            }
-            self.static_fields.trans_mode = put_request.trans_mode();
-            self.static_fields.closure_requested = put_request.closure_requested();
-            self.static_fields.seg_ctrl = put_request.seg_ctrl();
-            let mut current_idx = 0;
-            let mut store_tlv = |tlv: &Tlv| {
-                if current_idx + tlv.len_full() > self.opts_buf.len() {
-                    return Err(ByteConversionError::ToSliceTooSmall {
-                        found: self.opts_buf.len(),
-                        expected: current_idx + tlv.len_full(),
-                    });
-                }
-                // We checked the buffer lengths, so this should never fail.
-                tlv.write_to_bytes(&mut self.opts_buf[current_idx..current_idx + tlv.len_full()])
-                    .unwrap();
-                current_idx += tlv.len_full();
-                Ok(())
-            };
-            if let Some(fs_req) = put_request.fs_requests() {
-                for fs_req in fs_req {
-                    store_tlv(&fs_req)?;
-                }
-            }
-            if let Some(msgs_to_user) = put_request.msgs_to_user() {
-                for msg_to_user in msgs_to_user {
-                    store_tlv(&msg_to_user)?;
-                }
-            }
-            self.opts_len = current_idx;
-            Ok(())
-        }
-
-        pub fn has_source_file(&self) -> bool {
-            self.static_fields.source_file_len > 0
-        }
-
-        pub fn has_dest_file(&self) -> bool {
-            self.static_fields.dest_file_len > 0
-        }
-
-        pub fn source_file(&self) -> Result<&str, Utf8Error> {
-            core::str::from_utf8(
-                &self.static_fields.source_file_buf[0..self.static_fields.source_file_len],
-            )
-        }
-
-        pub fn dest_file(&self) -> Result<&str, Utf8Error> {
-            core::str::from_utf8(
-                &self.static_fields.dest_file_buf[0..self.static_fields.dest_file_len],
-            )
-        }
-
-        pub fn opts_len(&self) -> usize {
-            self.opts_len
-        }
-
-        pub fn opts_slice(&self) -> &[u8] {
-            &self.opts_buf[0..self.opts_len]
-        }
-
-        /// This clears the cacher structure. This is a cheap operation because it only
-        /// sets [Option]al values to [None] and the length of stores TLVs to 0.
-        ///
-        /// Please note that this method will not set the values in the buffer to 0.
-        pub fn clear(&mut self) {
-            self.static_fields.clear();
-            self.opts_len = 0;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -689,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_put_request_cacher_basic() {
-        let put_request_cached = StaticPutRequestCacher::new(128);
+        let put_request_cached = StaticPutRequestCacher::<128>::new();
         assert_eq!(put_request_cached.static_fields.source_file_len, 0);
         assert_eq!(put_request_cached.static_fields.dest_file_len, 0);
         assert_eq!(put_request_cached.opts_len(), 0);
@@ -698,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_put_request_cacher_set() {
-        let mut put_request_cached = StaticPutRequestCacher::new(128);
+        let mut put_request_cached = StaticPutRequestCacher::<128>::new();
         let src_file = "/tmp/hello.txt";
         let dest_file = "/tmp/hello2.txt";
         let put_request =
@@ -720,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_put_request_cacher_set_and_clear() {
-        let mut put_request_cached = StaticPutRequestCacher::new(128);
+        let mut put_request_cached = StaticPutRequestCacher::<128>::new();
         let src_file = "/tmp/hello.txt";
         let dest_file = "/tmp/hello2.txt";
         let put_request =

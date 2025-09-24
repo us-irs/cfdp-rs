@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install nextest
         uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --all-features
+      - run: cargo nextest run --features "serde, defmt"
       - run: cargo test --doc
 
   msrv:
@@ -45,7 +45,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "armv7-unknown-linux-gnueabihf, thumbv7em-none-eabihf"
-      - run: cargo check --release --target=${{matrix.target}} --no-default-features --features "alloc"
+      - run: cargo check --release --target=${{matrix.target}} --no-default-features --features "packet-buf-1k, defmt"
 
   fmt:
     name: Check formatting
@@ -53,6 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - run: cargo fmt --all -- --check
 
   docs:
@@ -61,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --all-features
+      - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --features "serde, defmt"
 
   clippy:
     name: Clippy
@@ -69,4 +71,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - run: cargo clippy -- -D warnings

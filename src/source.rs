@@ -267,9 +267,10 @@ impl<CountdownInstance: Countdown> TransactionParams<CountdownInstance> {
 ///
 /// A put request will only be accepted if the handler is in the idle state.
 ///
-/// The handler requires the [alloc] feature but will allocated all required memory on construction
-/// time. This means that the handler is still suitable for embedded systems where run-time
-/// allocation is prohibited. Furthermore, it uses the [VirtualFilestore] abstraction to allow
+/// The handler has an internal buffer for PDU generation and checksum generation. The size of this
+/// buffer is select via Cargo features and defaults to 2048 bytes. It does not allocate
+/// memory during run-time and thus is suitable for embedded systems where  allocation is
+/// not possible. Furthermore, it uses the [VirtualFilestore] abstraction to allow
 /// usage on systems without a [std] filesystem.
 /// This handler does not support concurrency out of the box. Instead, if concurrent handling
 /// is required, it is recommended to create a new handler and run all active handlers inside a
@@ -285,8 +286,8 @@ pub struct SourceHandler<
 > {
     local_cfg: LocalEntityConfig<UserFaultHookInstance>,
     pdu_sender: PduSenderInstance,
-    pdu_and_cksum_buffer: RefCell<alloc::vec::Vec<u8>>,
-    put_request_cacher: StaticPutRequestCacher,
+    pdu_and_cksum_buffer: RefCell<[u8; crate::buf_len::PACKET_BUF_LEN]>,
+    put_request_cacher: StaticPutRequestCacher<{ crate::buf_len::PACKET_BUF_LEN }>,
     remote_cfg_table: RemoteConfigStoreInstance,
     vfs: Vfs,
     state_helper: StateHelper,
@@ -326,10 +327,6 @@ impl<
     ///   for embedded systems where a standard runtime might not be available.
     /// * `put_request_cacher` - The put request cacher is used cache put requests without
     ///   requiring run-time allocation.
-    /// * `pdu_and_cksum_buf_size` - The handler requires a buffer to generate PDUs and perform
-    ///   checksum calculations. The user can specify the size of this buffer, so this should be
-    ///   set to the maximum expected PDU size or a conservative upper bound for this size, for
-    ///   example 2048 or 4096 bytes.
     /// * `remote_cfg_table` - The [RemoteEntityConfig] used to look up remote
     ///   entities and target specific configuration for file copy operations.
     /// * `timer_creator` - [TimerCreator] used by the CFDP handler to generate
@@ -342,8 +339,6 @@ impl<
         cfg: LocalEntityConfig<UserFaultHookInstance>,
         pdu_sender: PduSenderInstance,
         vfs: Vfs,
-        put_request_cacher: StaticPutRequestCacher,
-        pdu_and_cksum_buf_size: usize,
         remote_cfg_table: RemoteConfigStoreInstance,
         timer_creator: TimerCreatorInstance,
         seq_count_provider: SequenceCounterInstance,
@@ -352,9 +347,9 @@ impl<
             local_cfg: cfg,
             remote_cfg_table,
             pdu_sender,
-            pdu_and_cksum_buffer: RefCell::new(alloc::vec![0; pdu_and_cksum_buf_size]),
+            pdu_and_cksum_buffer: RefCell::new([0; crate::buf_len::PACKET_BUF_LEN]),
             vfs,
-            put_request_cacher,
+            put_request_cacher: StaticPutRequestCacher::<{ crate::buf_len::PACKET_BUF_LEN }>::new(),
             state_helper: Default::default(),
             transaction_params: Default::default(),
             anomalies: Default::default(),
@@ -802,7 +797,7 @@ impl<
                 .unwrap()
                 .default_crc_type,
             self.transaction_params.file_params.file_size,
-            &mut self.pdu_and_cksum_buffer.borrow_mut(),
+            self.pdu_and_cksum_buffer.borrow_mut().as_mut_slice(),
         )?;
         self.transaction_params.file_params.checksum_completed_file = Some(checksum);
         self.prepare_and_send_eof_pdu(user, checksum)?;
@@ -1081,7 +1076,7 @@ impl<
 
     fn pdu_send_helper(&self, pdu: &(impl WritablePduPacket + CfdpPdu)) -> Result<(), SourceError> {
         let mut pdu_buffer_mut = self.pdu_and_cksum_buffer.borrow_mut();
-        let written_len = pdu.write_to_bytes(&mut pdu_buffer_mut)?;
+        let written_len = pdu.write_to_bytes(pdu_buffer_mut.as_mut_slice())?;
         self.pdu_sender.send_pdu(
             pdu.pdu_type(),
             pdu.file_directive_type(),
@@ -1171,7 +1166,7 @@ impl<
                 .unwrap()
                 .default_crc_type,
             self.transaction_params.file_params.progress,
-            &mut self.pdu_and_cksum_buffer.borrow_mut(),
+            self.pdu_and_cksum_buffer.borrow_mut().as_mut_slice(),
         )?;
         self.prepare_and_send_eof_pdu(user, checksum)?;
         *sent_packets += 1;
@@ -1338,7 +1333,6 @@ mod tests {
                 indication_cfg: IndicationConfig::default(),
                 fault_handler: FaultHandler::new(TestFaultHandler::default()),
             };
-            let static_put_request_cacher = StaticPutRequestCacher::new(2048);
             let (srcfile_handle, destfile) = init_full_filepaths_textfile();
             let srcfile = String::from(srcfile_handle.to_path_buf().to_str().unwrap());
             let expiry_control = TimerExpiryControl::default();
@@ -1348,8 +1342,6 @@ mod tests {
                     local_entity_cfg,
                     sender,
                     NativeFilestore::default(),
-                    static_put_request_cacher,
-                    1024,
                     basic_remote_cfg_table(
                         REMOTE_ID,
                         max_packet_len,

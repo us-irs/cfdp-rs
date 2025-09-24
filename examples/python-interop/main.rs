@@ -17,7 +17,7 @@ use cfdp::{
     dest::DestinationHandler,
     filestore::NativeFilestore,
     lost_segments::LostSegmentsList,
-    request::{PutRequestOwned, StaticPutRequestCacher},
+    request::PutRequestOwned,
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
 };
@@ -313,7 +313,6 @@ fn main() {
     );
     let (source_tm_tx, source_tm_rx) = mpsc::channel::<PduOwnedWithInfo>();
     let (dest_tm_tx, dest_tm_rx) = mpsc::channel::<PduOwnedWithInfo>();
-    let put_request_cacher = StaticPutRequestCacher::new(2048);
     let remote_cfg_python = RemoteEntityConfig::new_with_default_values(
         PYTHON_ID.into(),
         1024,
@@ -327,8 +326,6 @@ fn main() {
         local_cfg_source,
         source_tm_tx,
         NativeFilestore::default(),
-        put_request_cacher,
-        2048,
         remote_cfg_python,
         StdTimerCreator::default(),
         seq_count_provider,
@@ -342,7 +339,6 @@ fn main() {
     );
     let mut dest_handler = DestinationHandler::new(
         local_cfg_dest,
-        1024,
         dest_tm_tx,
         NativeFilestore::default(),
         remote_cfg_python,

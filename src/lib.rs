@@ -8,7 +8,7 @@
 //! `cfdp-rs` currently supports following high-level features:
 //!
 //! - Unacknowledged (class 1) file transfers for both source and destination side.
-//! - Acknowledged (class 2) file transfers for both source side and destination side.
+//! - Acknowledged (class 2) file transfers for both source and destination side.
 //!
 //! The following features have not been implemented yet. PRs or notifications for demand are welcome!
 //!
@@ -32,17 +32,42 @@
 //! The goal of this library is to be flexible enough to support the use-cases of both on-board
 //! software and of ground software. It has support to make integration on [std] systems as simple
 //! as possible, but also has sufficient abstraction to allow for integration on `no_std`
-//! environments and can be used on these systems as well as long as the [alloc] feature is used
-//! as well.
+//! environments and can be used on these systems as well.
 //!
-//! Please note even though the [alloc] feature is required for the core handlers, these components
-//! will only allocate memory at initialization time and thus are still viable for systems where
-//! run-time allocation is prohibited.
+//! The core handlers inside this library do not allocate memory dynamically. The internal buffer
+//! size used for PDU generation and checksum calculation is statically determined via a Rust
+//! feature and defaults to 2048 bytes.
 //!
 //! The core of this library are the [crate::dest::DestinationHandler] and the
 //! [crate::source::SourceHandler] components which model the CFDP destination and source entity
 //! respectively. You can find high-level and API documentation for both handlers in the respective
 //! [crate::dest] and [crate::source] module.
+//!
+//! # Rust Features
+//!
+//! ## Default features
+//!
+//!  - [`std`](https://doc.rust-lang.org/std/): Enables functionality relying on the standard library.
+//!  - [`alloc`](https://doc.rust-lang.org/alloc/): Enables features which require allocation support.
+//!    Enabled by the `std` feature.
+//!
+//! ## Optional Features
+//!
+//!  - [`serde`](https://serde.rs/): Adds `serde` support for most types by adding `Serialize` and `Deserialize` `derive`s
+//!  - [`defmt`](https://defmt.ferrous-systems.com/): Add support for the `defmt` by adding the
+//!    [`defmt::Format`](https://defmt.ferrous-systems.com/format) derive on many types.
+//!
+//! ## Buffer size selection
+//!
+//! The following features can be used to select the internal buffer size used for PDU generation
+//! and checksum calculation. Selection of this value possibly limits the size of the generated PDU
+//! packets. Only one feature may be enabled.
+//!
+//! - `packet-buf-256` for 256 bytes
+//! - `packet-buf-512` for 512 bytes
+//! - `packet-buf-1k` for 1024 bytes
+//! - `packet-buf-2k` for 2048 bytes. This is the default.
+//! - `packet-buf-4k` for 4096 bytes
 //!
 //! # Examples
 //!
@@ -89,12 +114,11 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
-#[cfg(feature = "alloc")]
+pub mod buf_len;
 pub mod dest;
 pub mod filestore;
 pub mod lost_segments;
 pub mod request;
-#[cfg(feature = "alloc")]
 pub mod source;
 pub mod time;
 pub mod user;
@@ -374,6 +398,7 @@ impl RemoteConfigStore for RemoteConfigList {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl RemoteConfigList {
     pub fn remove_config(&mut self, remote_id: u64) -> bool {
         for (idx, cfg) in self.0.iter().enumerate() {
@@ -386,7 +411,7 @@ impl RemoteConfigList {
     }
 }
 
-/// This is a thin wrapper around a [alloc::vec::Vec] to store remote entity configurations.
+/// This is a thin wrapper around a [heapless::vec::Vec] to store remote entity configurations.
 /// It implements the full [RemoteEntityConfig] trait.
 #[derive(Default, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
