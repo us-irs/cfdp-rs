@@ -8,11 +8,10 @@
 //! `cfdp-rs` currently supports following high-level features:
 //!
 //! - Unacknowledged (class 1) file transfers for both source and destination side.
-//! - Acknowledged (class 2) file transfers for the source side.
+//! - Acknowledged (class 2) file transfers for both source side and destination side.
 //!
 //! The following features have not been implemented yet. PRs or notifications for demand are welcome!
 //!
-//! - Acknowledged (class 2) file transfers for the destination side.
 //! - Suspending transfers
 //! - Inactivity handling
 //! - Start and end of transmission and reception opportunity handling
@@ -72,7 +71,7 @@
 //!
 //! # Notes on the user hooks and scheduling
 //!
-//! Both examples feature implementations of the [UserFaultHookProvider] and the [user::CfdpUser]
+//! Both examples feature implementations of the [UserFaultHook] and the [user::CfdpUser]
 //! trait which simply print some information to the console to monitor the progress of a file
 //! copy operation. These implementations could be adapted for other handler integrations. For
 //! example, they could signal a GUI application to display some information for the user.
@@ -93,13 +92,14 @@ extern crate std;
 #[cfg(feature = "alloc")]
 pub mod dest;
 pub mod filestore;
+pub mod lost_segments;
 pub mod request;
 #[cfg(feature = "alloc")]
 pub mod source;
 pub mod time;
 pub mod user;
 
-use crate::time::CountdownProvider;
+use crate::time::Countdown;
 use core::{cell::RefCell, fmt::Debug, hash::Hash};
 use crc::{CRC_32_ISCSI, CRC_32_ISO_HDLC, Crc};
 
@@ -180,8 +180,8 @@ pub enum TimerContext {
 /// The timer will be used to perform the Positive Acknowledgement Procedures as specified in
 /// 4.7. 1of the CFDP standard. The expiration period will be provided by the Positive ACK timer
 /// interval of the remote entity configuration.
-pub trait TimerCreatorProvider {
-    type Countdown: CountdownProvider;
+pub trait TimerCreator {
+    type Countdown: Countdown;
 
     fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown;
 }
@@ -256,12 +256,12 @@ pub struct RemoteEntityConfig {
     pub crc_on_transmission_by_default: bool,
     pub default_transmission_mode: TransmissionMode,
     pub default_crc_type: ChecksumType,
-    pub positive_ack_timer_interval_seconds: f32,
+    pub positive_ack_timer_interval: Duration,
     pub positive_ack_timer_expiration_limit: u32,
     pub check_limit: u32,
     pub disposition_on_cancellation: bool,
     pub immediate_nak_mode: bool,
-    pub nak_timer_interval_seconds: f32,
+    pub nak_timer_interval: Duration,
     pub nak_timer_expiration_limit: u32,
 }
 
@@ -283,61 +283,74 @@ impl RemoteEntityConfig {
             default_transmission_mode,
             default_crc_type,
             check_limit: 2,
-            positive_ack_timer_interval_seconds: 10.0,
+            positive_ack_timer_interval: Duration::from_secs(10),
             positive_ack_timer_expiration_limit: 2,
             disposition_on_cancellation: false,
             immediate_nak_mode: true,
-            nak_timer_interval_seconds: 10.0,
+            nak_timer_interval: Duration::from_secs(10),
             nak_timer_expiration_limit: 2,
         }
     }
 }
 
-pub trait RemoteEntityConfigProvider {
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum RemoteConfigStoreError {
+    #[error("store is full")]
+    Full,
+}
+
+pub trait RemoteConfigStore {
     /// Retrieve the remote entity configuration for the given remote ID.
     fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig>;
+
     fn get_mut(&mut self, remote_id: u64) -> Option<&mut RemoteEntityConfig>;
+
     /// Add a new remote configuration. Return [true] if the configuration was
     /// inserted successfully, and [false] if a configuration already exists.
-    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> bool;
-    /// Remote a configuration. Returns [true] if the configuration was removed successfully,
-    /// and [false] if no configuration exists for the given remote ID.
-    fn remove_config(&mut self, remote_id: u64) -> bool;
+    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> Result<bool, RemoteConfigStoreError>;
 }
 
 /// This is a thin wrapper around a [hashbrown::HashMap] to store remote entity configurations.
-/// It implements the full [RemoteEntityConfigProvider] trait.
+/// It implements the full [RemoteEntityConfig] trait.
 #[cfg(feature = "alloc")]
 #[derive(Default, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct StdRemoteEntityConfigProvider(pub hashbrown::HashMap<u64, RemoteEntityConfig>);
+pub struct RemoteConfigStoreStd(pub hashbrown::HashMap<u64, RemoteEntityConfig>);
 
 #[cfg(feature = "std")]
-impl RemoteEntityConfigProvider for StdRemoteEntityConfigProvider {
+impl RemoteConfigStore for RemoteConfigStoreStd {
     fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
         self.0.get(&remote_id)
     }
+
     fn get_mut(&mut self, remote_id: u64) -> Option<&mut RemoteEntityConfig> {
         self.0.get_mut(&remote_id)
     }
-    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> bool {
-        self.0.insert(cfg.entity_id.value(), *cfg).is_some()
+
+    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> Result<bool, RemoteConfigStoreError> {
+        Ok(self.0.insert(cfg.entity_id.value(), *cfg).is_some())
     }
-    fn remove_config(&mut self, remote_id: u64) -> bool {
+}
+
+#[cfg(feature = "std")]
+impl RemoteConfigStoreStd {
+    pub fn remove_config(&mut self, remote_id: u64) -> bool {
         self.0.remove(&remote_id).is_some()
     }
 }
 
 /// This is a thin wrapper around a [alloc::vec::Vec] to store remote entity configurations.
-/// It implements the full [RemoteEntityConfigProvider] trait.
+/// It implements the full [RemoteEntityConfig] trait.
 #[cfg(feature = "alloc")]
 #[derive(Default, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct VecRemoteEntityConfigProvider(pub alloc::vec::Vec<RemoteEntityConfig>);
+pub struct RemoteConfigList(pub alloc::vec::Vec<RemoteEntityConfig>);
 
 #[cfg(feature = "alloc")]
-impl RemoteEntityConfigProvider for VecRemoteEntityConfigProvider {
+impl RemoteConfigStore for RemoteConfigList {
     fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
         self.0
             .iter()
@@ -350,12 +363,19 @@ impl RemoteEntityConfigProvider for VecRemoteEntityConfigProvider {
             .find(|cfg| cfg.entity_id.value() == remote_id)
     }
 
-    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> bool {
+    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> Result<bool, RemoteConfigStoreError> {
+        for other_cfg in self.0.iter() {
+            if cfg.entity_id.value() == other_cfg.entity_id.value() {
+                return Ok(false);
+            }
+        }
         self.0.push(*cfg);
-        true
+        Ok(true)
     }
+}
 
-    fn remove_config(&mut self, remote_id: u64) -> bool {
+impl RemoteConfigList {
+    pub fn remove_config(&mut self, remote_id: u64) -> bool {
         for (idx, cfg) in self.0.iter().enumerate() {
             if cfg.entity_id.value() == remote_id {
                 self.0.remove(idx);
@@ -366,10 +386,55 @@ impl RemoteEntityConfigProvider for VecRemoteEntityConfigProvider {
     }
 }
 
-/// A remote entity configurations also implements the [RemoteEntityConfigProvider], but the
-/// [RemoteEntityConfigProvider::add_config] and [RemoteEntityConfigProvider::remove_config]
-/// are no-ops and always returns [false].
-impl RemoteEntityConfigProvider for RemoteEntityConfig {
+/// This is a thin wrapper around a [alloc::vec::Vec] to store remote entity configurations.
+/// It implements the full [RemoteEntityConfig] trait.
+#[derive(Default, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RemoteConfigListHeapless<const N: usize>(pub heapless::vec::Vec<RemoteEntityConfig, N>);
+
+impl<const N: usize> RemoteConfigStore for RemoteConfigListHeapless<N> {
+    fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
+        self.0
+            .iter()
+            .find(|&cfg| cfg.entity_id.value() == remote_id)
+    }
+
+    fn get_mut(&mut self, remote_id: u64) -> Option<&mut RemoteEntityConfig> {
+        self.0
+            .iter_mut()
+            .find(|cfg| cfg.entity_id.value() == remote_id)
+    }
+
+    fn add_config(&mut self, cfg: &RemoteEntityConfig) -> Result<bool, RemoteConfigStoreError> {
+        if self.0.is_full() {
+            return Err(RemoteConfigStoreError::Full);
+        }
+        for other_cfg in self.0.iter() {
+            if cfg.entity_id.value() == other_cfg.entity_id.value() {
+                return Ok(false);
+            }
+        }
+        self.0.push(*cfg).unwrap();
+        Ok(true)
+    }
+}
+
+impl<const N: usize> RemoteConfigListHeapless<N> {
+    pub fn remove_config(&mut self, remote_id: u64) -> bool {
+        for (idx, cfg) in self.0.iter().enumerate() {
+            if cfg.entity_id.value() == remote_id {
+                self.0.remove(idx);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// A remote entity configurations also implements the [RemoteConfigStore], but the
+/// [RemoteConfigStore::add_config] always returns [RemoteConfigStoreError::Full].
+impl RemoteConfigStore for RemoteEntityConfig {
     fn get(&self, remote_id: u64) -> Option<&RemoteEntityConfig> {
         if remote_id == self.entity_id.value() {
             return Some(self);
@@ -384,76 +449,44 @@ impl RemoteEntityConfigProvider for RemoteEntityConfig {
         None
     }
 
-    fn add_config(&mut self, _cfg: &RemoteEntityConfig) -> bool {
-        false
-    }
-
-    fn remove_config(&mut self, _remote_id: u64) -> bool {
-        false
+    fn add_config(&mut self, _cfg: &RemoteEntityConfig) -> Result<bool, RemoteConfigStoreError> {
+        Err(RemoteConfigStoreError::Full)
     }
 }
 
 /// This trait introduces some callbacks which will be called when a particular CFDP fault
 /// handler is called.
 ///
-/// It is passed into the CFDP handlers as part of the [UserFaultHookProvider] and the local entity
+/// It is passed into the CFDP handlers as part of the [UserFaultHook] and the local entity
 /// configuration and provides a way to specify custom user error handlers. This allows to
 /// implement some CFDP features like fault handler logging, which would not be possible
 /// generically otherwise.
 ///
 /// For each error reported by the [FaultHandler], the appropriate fault handler callback
 /// will be called depending on the [FaultHandlerCode].
-pub trait UserFaultHookProvider {
-    fn notice_of_suspension_cb(
-        &mut self,
-        transaction_id: TransactionId,
-        cond: ConditionCode,
-        progress: u64,
-    );
+pub trait UserFaultHook {
+    fn notice_of_suspension_cb(&mut self, fault_info: FaultInfo);
 
-    fn notice_of_cancellation_cb(
-        &mut self,
-        transaction_id: TransactionId,
-        cond: ConditionCode,
-        progress: u64,
-    );
+    fn notice_of_cancellation_cb(&mut self, fault_info: FaultInfo);
 
-    fn abandoned_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64);
+    fn abandoned_cb(&mut self, fault_info: FaultInfo);
 
-    fn ignore_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64);
+    fn ignore_cb(&mut self, fault_info: FaultInfo);
 }
 
-/// Dummy fault hook which implements [UserFaultHookProvider] but only provides empty
+/// Dummy fault hook which implements [UserFaultHook] but only provides empty
 /// implementations.
 #[derive(Default, Debug, PartialEq, Eq, Copy, Clone)]
 pub struct DummyFaultHook {}
 
-impl UserFaultHookProvider for DummyFaultHook {
-    fn notice_of_suspension_cb(
-        &mut self,
-        _transaction_id: TransactionId,
-        _cond: ConditionCode,
-        _progress: u64,
-    ) {
-    }
+impl UserFaultHook for DummyFaultHook {
+    fn notice_of_suspension_cb(&mut self, _fault_info: FaultInfo) {}
 
-    fn notice_of_cancellation_cb(
-        &mut self,
-        _transaction_id: TransactionId,
-        _cond: ConditionCode,
-        _progress: u64,
-    ) {
-    }
+    fn notice_of_cancellation_cb(&mut self, _fault_info: FaultInfo) {}
 
-    fn abandoned_cb(
-        &mut self,
-        _transaction_id: TransactionId,
-        _cond: ConditionCode,
-        _progress: u64,
-    ) {
-    }
+    fn abandoned_cb(&mut self, _fault_info: FaultInfo) {}
 
-    fn ignore_cb(&mut self, _transaction_id: TransactionId, _cond: ConditionCode, _progress: u64) {}
+    fn ignore_cb(&mut self, _fault_info: FaultInfo) {}
 }
 
 /// This structure is used to implement the fault handling as specified in chapter 4.8 of the CFDP
@@ -462,7 +495,7 @@ impl UserFaultHookProvider for DummyFaultHook {
 /// It does so by mapping each applicable [spacepackets::cfdp::ConditionCode] to a fault handler
 /// which is denoted by the four [spacepackets::cfdp::FaultHandlerCode]s. This code is used
 /// to select the error handling inside the CFDP handler itself in addition to dispatching to a
-/// user-provided callback function provided by the [UserFaultHookProvider].
+/// user-provided callback function provided by the [UserFaultHook].
 ///
 /// Some note on the provided default settings:
 ///
@@ -476,14 +509,51 @@ impl UserFaultHookProvider for DummyFaultHook {
 /// These defaults can be overriden by using the [Self::set_fault_handler] method.
 /// Please note that in any case, fault handler overrides can be specified by the sending CFDP
 /// entity.
-pub struct FaultHandler<UserHandler: UserFaultHookProvider> {
+pub struct FaultHandler<UserHandler: UserFaultHook> {
     handler_array: [FaultHandlerCode; 10],
     // Could also change the user fault handler trait to have non mutable methods, but that limits
     // flexbility on the user side..
     pub user_hook: RefCell<UserHandler>,
 }
 
-impl<UserHandler: UserFaultHookProvider> FaultHandler<UserHandler> {
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct FaultInfo {
+    transaction_id: TransactionId,
+    condition_code: ConditionCode,
+    progress: u64,
+}
+
+impl FaultInfo {
+    pub const fn new(
+        transaction_id: TransactionId,
+        condition_code: ConditionCode,
+        progress: u64,
+    ) -> Self {
+        Self {
+            transaction_id,
+            condition_code,
+            progress,
+        }
+    }
+
+    #[inline]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    #[inline]
+    pub const fn condition_code(&self) -> ConditionCode {
+        self.condition_code
+    }
+
+    #[inline]
+    pub const fn progress(&self) -> u64 {
+        self.progress
+    }
+}
+
+impl<UserHandler: UserFaultHook> FaultHandler<UserHandler> {
     fn condition_code_to_array_index(conditon_code: ConditionCode) -> Option<usize> {
         Some(match conditon_code {
             ConditionCode::PositiveAckLimitReached => 0,
@@ -533,33 +603,23 @@ impl<UserHandler: UserFaultHookProvider> FaultHandler<UserHandler> {
         self.handler_array[array_idx.unwrap()]
     }
 
-    pub fn report_fault(
-        &self,
-        transaction_id: TransactionId,
-        condition: ConditionCode,
-        progress: u64,
-    ) -> FaultHandlerCode {
-        let array_idx = Self::condition_code_to_array_index(condition);
-        if array_idx.is_none() {
-            return FaultHandlerCode::IgnoreError;
-        }
-        let fh_code = self.handler_array[array_idx.unwrap()];
+    pub fn report_fault(&self, code: FaultHandlerCode, fault_info: FaultInfo) -> FaultHandlerCode {
         let mut handler_mut = self.user_hook.borrow_mut();
-        match fh_code {
+        match code {
             FaultHandlerCode::NoticeOfCancellation => {
-                handler_mut.notice_of_cancellation_cb(transaction_id, condition, progress);
+                handler_mut.notice_of_cancellation_cb(fault_info);
             }
             FaultHandlerCode::NoticeOfSuspension => {
-                handler_mut.notice_of_suspension_cb(transaction_id, condition, progress);
+                handler_mut.notice_of_suspension_cb(fault_info);
             }
             FaultHandlerCode::IgnoreError => {
-                handler_mut.ignore_cb(transaction_id, condition, progress);
+                handler_mut.ignore_cb(fault_info);
             }
             FaultHandlerCode::AbandonTransaction => {
-                handler_mut.abandoned_cb(transaction_id, condition, progress);
+                handler_mut.abandoned_cb(fault_info);
             }
         }
-        fh_code
+        code
     }
 }
 
@@ -589,17 +649,17 @@ impl Default for IndicationConfig {
 }
 
 /// Each CFDP entity handler has a [LocalEntityConfig]uration.
-pub struct LocalEntityConfig<UserFaultHook: UserFaultHookProvider> {
+pub struct LocalEntityConfig<UserFaultHookInstance: UserFaultHook> {
     pub id: UnsignedByteField,
     pub indication_cfg: IndicationConfig,
-    pub fault_handler: FaultHandler<UserFaultHook>,
+    pub fault_handler: FaultHandler<UserFaultHookInstance>,
 }
 
-impl<UserFaultHook: UserFaultHookProvider> LocalEntityConfig<UserFaultHook> {
+impl<UserFaultHookInstance: UserFaultHook> LocalEntityConfig<UserFaultHookInstance> {
     pub fn new(
         id: UnsignedByteField,
         indication_cfg: IndicationConfig,
-        hook: UserFaultHook,
+        hook: UserFaultHookInstance,
     ) -> Self {
         Self {
             id,
@@ -609,12 +669,12 @@ impl<UserFaultHook: UserFaultHookProvider> LocalEntityConfig<UserFaultHook> {
     }
 }
 
-impl<UserFaultHook: UserFaultHookProvider> LocalEntityConfig<UserFaultHook> {
-    pub fn user_fault_hook_mut(&mut self) -> &mut RefCell<UserFaultHook> {
+impl<UserFaultHookInstance: UserFaultHook> LocalEntityConfig<UserFaultHookInstance> {
+    pub fn user_fault_hook_mut(&mut self) -> &mut RefCell<UserFaultHookInstance> {
         &mut self.fault_handler.user_hook
     }
 
-    pub fn user_fault_hook(&self) -> &RefCell<UserFaultHook> {
+    pub fn user_fault_hook(&self) -> &RefCell<UserFaultHookInstance> {
         &self.fault_handler.user_hook
     }
 }
@@ -631,13 +691,21 @@ pub enum GenericSendError {
     Other,
 }
 
-pub trait PduSendProvider {
+pub trait PduSender {
     fn send_pdu(
         &self,
         pdu_type: PduType,
         file_directive_type: Option<FileDirectiveType>,
         raw_pdu: &[u8],
     ) -> Result<(), GenericSendError>;
+
+    fn send_file_directive_pdu(
+        &self,
+        file_directive_type: FileDirectiveType,
+        raw_pdu: &[u8],
+    ) -> Result<(), GenericSendError> {
+        self.send_pdu(PduType::FileDirective, Some(file_directive_type), raw_pdu)
+    }
 }
 
 #[cfg(feature = "std")]
@@ -646,7 +714,7 @@ pub mod std_mod {
 
     use super::*;
 
-    impl PduSendProvider for mpsc::Sender<PduOwnedWithInfo> {
+    impl PduSender for mpsc::Sender<PduOwnedWithInfo> {
         fn send_pdu(
             &self,
             pdu_type: PduType,
@@ -663,7 +731,7 @@ pub mod std_mod {
         }
     }
 
-    /// Simple implementation of the [CountdownProvider] trait assuming a standard runtime.
+    /// Simple implementation of the [Countdown] trait assuming a standard runtime.
     #[derive(Debug)]
     pub struct StdCountdown {
         expiry_time: Duration,
@@ -683,7 +751,7 @@ pub mod std_mod {
         }
     }
 
-    impl CountdownProvider for StdCountdown {
+    impl Countdown for StdCountdown {
         fn has_expired(&self) -> bool {
             if self.start_time.elapsed() > self.expiry_time {
                 return true;
@@ -714,7 +782,7 @@ pub mod std_mod {
         }
     }
 
-    impl TimerCreatorProvider for StdTimerCreator {
+    impl TimerCreator for StdTimerCreator {
         type Countdown = StdCountdown;
 
         fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
@@ -800,7 +868,7 @@ pub enum PacketTarget {
 pub trait PduProvider {
     fn pdu_type(&self) -> PduType;
     fn file_directive_type(&self) -> Option<FileDirectiveType>;
-    fn pdu(&self) -> &[u8];
+    fn raw_pdu(&self) -> &[u8];
     fn packet_target(&self) -> Result<PacketTarget, PduError>;
 }
 
@@ -815,7 +883,7 @@ impl PduProvider for DummyPduProvider {
         None
     }
 
-    fn pdu(&self) -> &[u8] {
+    fn raw_pdu(&self) -> &[u8] {
         &[]
     }
 
@@ -927,7 +995,7 @@ impl PduProvider for PduRawWithInfo<'_> {
         self.file_directive_type
     }
 
-    fn pdu(&self) -> &[u8] {
+    fn raw_pdu(&self) -> &[u8] {
         self.raw_packet
     }
 
@@ -989,7 +1057,7 @@ pub mod alloc_mod {
             self.file_directive_type
         }
 
-        fn pdu(&self) -> &[u8] {
+        fn raw_pdu(&self) -> &[u8] {
             &self.pdu
         }
 
@@ -997,6 +1065,12 @@ pub mod alloc_mod {
             determine_packet_target(&self.pdu)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PositiveAckParams {
+    ack_counter: u32,
+    positive_ack_of_cancellation: bool,
 }
 
 #[cfg(test)]
@@ -1016,6 +1090,7 @@ pub(crate) mod tests {
                 CommonPduConfig, FileDirectiveType, PduHeader,
                 eof::EofPdu,
                 file_data::FileDataPdu,
+                finished::{DeliveryCode, FileStatus},
                 metadata::{MetadataGenericParams, MetadataPduCreator},
             },
         },
@@ -1035,6 +1110,7 @@ pub(crate) mod tests {
     pub(crate) struct TimerExpiryControl {
         pub(crate) check_limit: Arc<AtomicBool>,
         pub(crate) positive_ack: Arc<AtomicBool>,
+        pub(crate) nak_activity: Arc<AtomicBool>,
     }
 
     impl TimerExpiryControl {
@@ -1043,9 +1119,13 @@ pub(crate) mod tests {
                 .store(true, core::sync::atomic::Ordering::Release);
         }
 
-        #[allow(dead_code)]
         pub fn set_positive_ack_expired(&mut self) {
             self.positive_ack
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+
+        pub fn set_nak_activity_expired(&mut self) {
+            self.nak_activity
                 .store(true, core::sync::atomic::Ordering::Release);
         }
     }
@@ -1057,7 +1137,7 @@ pub(crate) mod tests {
         expiry_control: TimerExpiryControl,
     }
 
-    impl CountdownProvider for TestCheckTimer {
+    impl Countdown for TestCheckTimer {
         fn has_expired(&self) -> bool {
             match self.context {
                 TimerContext::CheckLimit {
@@ -1072,7 +1152,10 @@ pub(crate) mod tests {
                     .expiry_control
                     .positive_ack
                     .load(core::sync::atomic::Ordering::Acquire),
-                TimerContext::NakActivity { expiry_time: _ } => todo!(),
+                TimerContext::NakActivity { expiry_time: _ } => self
+                    .expiry_control
+                    .nak_activity
+                    .load(core::sync::atomic::Ordering::Acquire),
             }
         }
         fn reset(&mut self) {
@@ -1085,7 +1168,10 @@ pub(crate) mod tests {
                     .expiry_control
                     .check_limit
                     .store(false, core::sync::atomic::Ordering::Release),
-                TimerContext::NakActivity { expiry_time: _ } => todo!(),
+                TimerContext::NakActivity { expiry_time: _ } => self
+                    .expiry_control
+                    .nak_activity
+                    .store(false, core::sync::atomic::Ordering::Release),
                 TimerContext::PositiveAck { expiry_time: _ } => self
                     .expiry_control
                     .positive_ack
@@ -1117,7 +1203,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl TimerCreatorProvider for TestCheckTimerCreator {
+    impl TimerCreator for TestCheckTimerCreator {
         type Countdown = TestCheckTimer;
 
         fn create_countdown(&self, timer_context: TimerContext) -> Self::Countdown {
@@ -1128,13 +1214,14 @@ pub(crate) mod tests {
                 TimerContext::PositiveAck { expiry_time: _ } => {
                     TestCheckTimer::new(timer_context, &self.expiry_control)
                 }
-                _ => {
-                    panic!("invalid check timer creator, can only be used for check limit handling")
+                TimerContext::NakActivity { expiry_time: _ } => {
+                    TestCheckTimer::new(timer_context, &self.expiry_control)
                 }
             }
         }
     }
 
+    #[derive(Debug)]
     pub struct FileSegmentRecvdParamsNoSegMetadata {
         #[allow(dead_code)]
         pub id: TransactionId,
@@ -1142,8 +1229,9 @@ pub(crate) mod tests {
         pub length: usize,
     }
 
-    #[derive(Default)]
+    #[derive(Default, Debug)]
     pub struct TestCfdpUser {
+        pub check_queues_empty_on_drop: bool,
         pub next_expected_seq_num: u64,
         pub expected_full_src_name: String,
         pub expected_full_dest_name: String,
@@ -1164,6 +1252,7 @@ pub(crate) mod tests {
             expected_file_size: u64,
         ) -> Self {
             Self {
+                check_queues_empty_on_drop: true,
                 next_expected_seq_num,
                 expected_full_src_name,
                 expected_full_dest_name,
@@ -1180,6 +1269,36 @@ pub(crate) mod tests {
         pub fn generic_id_check(&self, id: &crate::TransactionId) {
             assert_eq!(id.source_id, LOCAL_ID.into());
             assert_eq!(id.seq_num().value(), self.next_expected_seq_num);
+        }
+
+        pub fn indication_queues_empty(&self) -> bool {
+            self.finished_indic_queue.is_empty()
+                && self.metadata_recv_queue.is_empty()
+                && self.file_seg_recvd_queue.is_empty()
+        }
+
+        pub fn verify_finished_indication_retained(
+            &mut self,
+            delivery_code: DeliveryCode,
+            cond_code: ConditionCode,
+            id: TransactionId,
+        ) {
+            self.verify_finished_indication(delivery_code, cond_code, id, FileStatus::Retained);
+        }
+
+        pub fn verify_finished_indication(
+            &mut self,
+            delivery_code: DeliveryCode,
+            cond_code: ConditionCode,
+            id: TransactionId,
+            file_status: FileStatus,
+        ) {
+            assert_eq!(self.finished_indic_queue.len(), 1);
+            let finished_indication = self.finished_indic_queue.pop_front().unwrap();
+            assert_eq!(finished_indication.id, id);
+            assert_eq!(finished_indication.condition_code, cond_code);
+            assert_eq!(finished_indication.delivery_code, delivery_code);
+            assert_eq!(finished_indication.file_status, file_status);
         }
     }
 
@@ -1270,48 +1389,43 @@ pub(crate) mod tests {
         }
     }
 
-    #[derive(Default, Debug)]
-    pub(crate) struct TestFaultHandler {
-        pub notice_of_suspension_queue: VecDeque<(TransactionId, ConditionCode, u64)>,
-        pub notice_of_cancellation_queue: VecDeque<(TransactionId, ConditionCode, u64)>,
-        pub abandoned_queue: VecDeque<(TransactionId, ConditionCode, u64)>,
-        pub ignored_queue: VecDeque<(TransactionId, ConditionCode, u64)>,
+    impl Drop for TestCfdpUser {
+        fn drop(&mut self) {
+            if self.check_queues_empty_on_drop {
+                assert!(
+                    self.indication_queues_empty(),
+                    "indication queues not empty on drop: finished: {}, metadata: {}, file seg: {}",
+                    self.finished_indic_queue.len(),
+                    self.metadata_recv_queue.len(),
+                    self.file_seg_recvd_queue.len()
+                );
+            }
+        }
     }
 
-    impl UserFaultHookProvider for TestFaultHandler {
-        fn notice_of_suspension_cb(
-            &mut self,
-            transaction_id: TransactionId,
-            cond: ConditionCode,
-            progress: u64,
-        ) {
-            self.notice_of_suspension_queue
-                .push_back((transaction_id, cond, progress))
+    #[derive(Default, Debug)]
+    pub(crate) struct TestFaultHandler {
+        pub notice_of_suspension_queue: VecDeque<FaultInfo>,
+        pub notice_of_cancellation_queue: VecDeque<FaultInfo>,
+        pub abandoned_queue: VecDeque<FaultInfo>,
+        pub ignored_queue: VecDeque<FaultInfo>,
+    }
+
+    impl UserFaultHook for TestFaultHandler {
+        fn notice_of_suspension_cb(&mut self, fault_info: FaultInfo) {
+            self.notice_of_suspension_queue.push_back(fault_info)
         }
 
-        fn notice_of_cancellation_cb(
-            &mut self,
-            transaction_id: TransactionId,
-            cond: ConditionCode,
-            progress: u64,
-        ) {
-            self.notice_of_cancellation_queue
-                .push_back((transaction_id, cond, progress))
+        fn notice_of_cancellation_cb(&mut self, fault_info: FaultInfo) {
+            self.notice_of_cancellation_queue.push_back(fault_info)
         }
 
-        fn abandoned_cb(
-            &mut self,
-            transaction_id: TransactionId,
-            cond: ConditionCode,
-            progress: u64,
-        ) {
-            self.abandoned_queue
-                .push_back((transaction_id, cond, progress))
+        fn abandoned_cb(&mut self, fault_info: FaultInfo) {
+            self.abandoned_queue.push_back(fault_info)
         }
 
-        fn ignore_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64) {
-            self.ignored_queue
-                .push_back((transaction_id, cond, progress))
+        fn ignore_cb(&mut self, fault_info: FaultInfo) {
+            self.ignored_queue.push_back(fault_info)
         }
     }
 
@@ -1347,7 +1461,7 @@ pub(crate) mod tests {
         pub packet_queue: RefCell<VecDeque<SentPdu>>,
     }
 
-    impl PduSendProvider for TestCfdpSender {
+    impl PduSender for TestCfdpSender {
         fn send_pdu(
             &self,
             pdu_type: PduType,
@@ -1370,6 +1484,10 @@ pub(crate) mod tests {
     }
 
     impl TestCfdpSender {
+        pub fn queue_len(&self) -> usize {
+            self.packet_queue.borrow_mut().len()
+        }
+
         pub fn retrieve_next_pdu(&self) -> Option<SentPdu> {
             self.packet_queue.borrow_mut().pop_front()
         }
@@ -1383,8 +1501,8 @@ pub(crate) mod tests {
         dest_id: impl Into<UnsignedByteField>,
         max_packet_len: usize,
         crc_on_transmission_by_default: bool,
-    ) -> StdRemoteEntityConfigProvider {
-        let mut table = StdRemoteEntityConfigProvider::default();
+    ) -> RemoteConfigStoreStd {
+        let mut table = RemoteConfigStoreStd::default();
         let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
             dest_id.into(),
             max_packet_len,
@@ -1393,13 +1511,13 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        table.add_config(&remote_entity_cfg);
+        table.add_config(&remote_entity_cfg).unwrap();
         table
     }
 
     fn generic_pdu_header() -> PduHeader {
         let pdu_conf = CommonPduConfig::default();
-        PduHeader::new_no_file_data(pdu_conf, 0)
+        PduHeader::new_for_file_directive(pdu_conf, 0)
     }
 
     #[test]
@@ -1534,9 +1652,10 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        assert!(!remote_entity_cfg.add_config(&dummy));
-        // Removal is no-op.
-        assert!(!remote_entity_cfg.remove_config(REMOTE_ID.value()));
+        assert_eq!(
+            remote_entity_cfg.add_config(&dummy).unwrap_err(),
+            RemoteConfigStoreError::Full
+        );
         let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
         assert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
         // Does not exist.
@@ -1554,9 +1673,9 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        let mut remote_cfg_provider = StdRemoteEntityConfigProvider::default();
+        let mut remote_cfg_provider = RemoteConfigStoreStd::default();
         assert!(remote_cfg_provider.0.is_empty());
-        remote_cfg_provider.add_config(&remote_entity_cfg);
+        remote_cfg_provider.add_config(&remote_entity_cfg).unwrap();
         assert_eq!(remote_cfg_provider.0.len(), 1);
         let remote_entity_cfg_2 = RemoteEntityConfig::new_with_default_values(
             LOCAL_ID.into(),
@@ -1568,7 +1687,9 @@ pub(crate) mod tests {
         );
         let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value()).unwrap();
         assert_eq!(cfg_0.entity_id, REMOTE_ID.into());
-        remote_cfg_provider.add_config(&remote_entity_cfg_2);
+        remote_cfg_provider
+            .add_config(&remote_entity_cfg_2)
+            .unwrap();
         assert_eq!(remote_cfg_provider.0.len(), 2);
         let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value()).unwrap();
         assert_eq!(cfg_1.entity_id, LOCAL_ID.into());
@@ -1582,7 +1703,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_remote_cfg_provider_vector() {
-        let mut remote_cfg_provider = VecRemoteEntityConfigProvider::default();
+        let mut remote_cfg_provider = RemoteConfigList::default();
         let remote_entity_cfg = RemoteEntityConfig::new_with_default_values(
             REMOTE_ID.into(),
             1024,
@@ -1592,7 +1713,7 @@ pub(crate) mod tests {
             ChecksumType::Crc32,
         );
         assert!(remote_cfg_provider.0.is_empty());
-        remote_cfg_provider.add_config(&remote_entity_cfg);
+        remote_cfg_provider.add_config(&remote_entity_cfg).unwrap();
         assert_eq!(remote_cfg_provider.0.len(), 1);
         let remote_entity_cfg_2 = RemoteEntityConfig::new_with_default_values(
             LOCAL_ID.into(),
@@ -1604,7 +1725,11 @@ pub(crate) mod tests {
         );
         let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value()).unwrap();
         assert_eq!(cfg_0.entity_id, REMOTE_ID.into());
-        remote_cfg_provider.add_config(&remote_entity_cfg_2);
+        assert!(
+            remote_cfg_provider
+                .add_config(&remote_entity_cfg_2)
+                .unwrap()
+        );
         assert_eq!(remote_cfg_provider.0.len(), 2);
         let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value()).unwrap();
         assert_eq!(cfg_1.entity_id, LOCAL_ID.into());
@@ -1623,10 +1748,18 @@ pub(crate) mod tests {
             UnsignedByteFieldU8::new(0).into(),
             UnsignedByteFieldU8::new(0).into(),
         );
-        user_hook_dummy.notice_of_cancellation_cb(transaction_id, ConditionCode::NoError, 0);
-        user_hook_dummy.notice_of_suspension_cb(transaction_id, ConditionCode::NoError, 0);
-        user_hook_dummy.abandoned_cb(transaction_id, ConditionCode::NoError, 0);
-        user_hook_dummy.ignore_cb(transaction_id, ConditionCode::NoError, 0);
+        user_hook_dummy.notice_of_cancellation_cb(FaultInfo::new(
+            transaction_id,
+            ConditionCode::NoError,
+            0,
+        ));
+        user_hook_dummy.notice_of_suspension_cb(FaultInfo::new(
+            transaction_id,
+            ConditionCode::NoError,
+            0,
+        ));
+        user_hook_dummy.abandoned_cb(FaultInfo::new(transaction_id, ConditionCode::NoError, 0));
+        user_hook_dummy.ignore_cb(FaultInfo::new(transaction_id, ConditionCode::NoError, 0));
     }
 
     #[test]
@@ -1634,7 +1767,7 @@ pub(crate) mod tests {
         let dummy_pdu_provider = DummyPduProvider(());
         assert_eq!(dummy_pdu_provider.pdu_type(), PduType::FileData);
         assert!(dummy_pdu_provider.file_directive_type().is_none());
-        assert_eq!(dummy_pdu_provider.pdu(), &[]);
+        assert_eq!(dummy_pdu_provider.raw_pdu(), &[]);
         assert_eq!(
             dummy_pdu_provider.packet_target(),
             Ok(PacketTarget::SourceEntity)

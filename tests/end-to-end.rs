@@ -12,10 +12,11 @@ use std::{
 };
 
 use cfdp::{
-    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, RemoteEntityConfig,
-    StdTimerCreator, TransactionId, UserFaultHookProvider,
+    EntityType, FaultInfo, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo,
+    RemoteEntityConfig, StdTimerCreator, TransactionId, UserFaultHook,
     dest::DestinationHandler,
     filestore::NativeFilestore,
+    lost_segments::LostSegmentsList,
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
@@ -33,43 +34,21 @@ const FILE_DATA: &str = "Hello World!";
 #[derive(Default)]
 pub struct ExampleFaultHandler {}
 
-impl UserFaultHookProvider for ExampleFaultHandler {
-    fn notice_of_suspension_cb(
-        &mut self,
-        transaction_id: TransactionId,
-        cond: ConditionCode,
-        progress: u64,
-    ) {
-        panic!(
-            "unexpected suspension of transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+impl UserFaultHook for ExampleFaultHandler {
+    fn notice_of_suspension_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected suspension, {:?}", fault_info);
     }
 
-    fn notice_of_cancellation_cb(
-        &mut self,
-        transaction_id: TransactionId,
-        cond: ConditionCode,
-        progress: u64,
-    ) {
-        panic!(
-            "unexpected cancellation of transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+    fn notice_of_cancellation_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected cancellation, {:?}", fault_info);
     }
 
-    fn abandoned_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64) {
-        panic!(
-            "unexpected abandonment of transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+    fn abandoned_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected abandonment, {:?}", fault_info);
     }
 
-    fn ignore_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64) {
-        panic!(
-            "ignoring unexpected error in transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+    fn ignore_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected ignore, {:?}", fault_info);
     }
 }
 
@@ -159,7 +138,7 @@ impl CfdpUser for ExampleCfdpUser {
     }
 }
 
-fn end_to_end_test(with_closure: bool) {
+fn end_to_end_test(transmission_mode: TransmissionMode, with_closure: bool) {
     // Simplified event handling using atomic signals.
     let stop_signal_source = Arc::new(AtomicBool::new(false));
     let stop_signal_dest = stop_signal_source.clone();
@@ -194,7 +173,7 @@ fn end_to_end_test(with_closure: bool) {
         1024,
         with_closure,
         false,
-        spacepackets::cfdp::TransmissionMode::Unacknowledged,
+        transmission_mode,
         ChecksumType::Crc32,
     );
     let seq_count_provider = AtomicU16::default();
@@ -220,7 +199,7 @@ fn end_to_end_test(with_closure: bool) {
         1024,
         true,
         false,
-        spacepackets::cfdp::TransmissionMode::Unacknowledged,
+        transmission_mode,
         ChecksumType::Crc32,
     );
     let mut dest_handler = DestinationHandler::new(
@@ -230,6 +209,7 @@ fn end_to_end_test(with_closure: bool) {
         NativeFilestore::default(),
         remote_cfg_of_source,
         StdTimerCreator::default(),
+        LostSegmentsList::default(),
     );
     let mut cfdp_user_dest = ExampleCfdpUser::new(EntityType::Receiving, completion_signal_dest);
 
@@ -237,7 +217,7 @@ fn end_to_end_test(with_closure: bool) {
         REMOTE_ID.into(),
         srcfile.to_str().expect("invaid path string"),
         destfile.to_str().expect("invaid path string"),
-        Some(TransmissionMode::Unacknowledged),
+        Some(transmission_mode),
         Some(with_closure),
     )
     .expect("put request creation failed");
@@ -346,11 +326,16 @@ fn end_to_end_test(with_closure: bool) {
 }
 
 #[test]
-fn end_to_end_test_no_closure() {
-    end_to_end_test(false);
+fn end_to_end_unacknowledged_no_closure() {
+    end_to_end_test(TransmissionMode::Unacknowledged, false);
 }
 
 #[test]
-fn end_to_end_test_with_closure() {
-    end_to_end_test(true);
+fn end_to_end_unacknowledged_with_closure() {
+    end_to_end_test(TransmissionMode::Unacknowledged, true);
+}
+
+#[test]
+fn end_to_end_acknowledged() {
+    end_to_end_test(TransmissionMode::Acknowledged, true);
 }

@@ -12,10 +12,11 @@ use std::{
 };
 
 use cfdp::{
-    EntityType, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, PduProvider,
-    RemoteEntityConfig, StdTimerCreator, TransactionId, UserFaultHookProvider,
+    EntityType, FaultInfo, IndicationConfig, LocalEntityConfig, PduOwnedWithInfo, PduProvider,
+    RemoteEntityConfig, StdTimerCreator, TransactionId, UserFaultHook,
     dest::DestinationHandler,
     filestore::NativeFilestore,
+    lost_segments::LostSegmentsList,
     request::{PutRequestOwned, StaticPutRequestCacher},
     source::SourceHandler,
     user::{CfdpUser, FileSegmentRecvdParams, MetadataReceivedParams, TransactionFinishedParams},
@@ -62,43 +63,21 @@ pub struct Cli {
 #[derive(Default)]
 pub struct ExampleFaultHandler {}
 
-impl UserFaultHookProvider for ExampleFaultHandler {
-    fn notice_of_suspension_cb(
-        &mut self,
-        transaction_id: TransactionId,
-        cond: ConditionCode,
-        progress: u64,
-    ) {
-        panic!(
-            "unexpected suspension of transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+impl UserFaultHook for ExampleFaultHandler {
+    fn notice_of_suspension_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected suspension, {:?}", fault_info);
     }
 
-    fn notice_of_cancellation_cb(
-        &mut self,
-        transaction_id: TransactionId,
-        cond: ConditionCode,
-        progress: u64,
-    ) {
-        panic!(
-            "unexpected cancellation of transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+    fn notice_of_cancellation_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected cancellation, {:?}", fault_info);
     }
 
-    fn abandoned_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64) {
-        panic!(
-            "unexpected abandonment of transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+    fn abandoned_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected abandonment, {:?}", fault_info);
     }
 
-    fn ignore_cb(&mut self, transaction_id: TransactionId, cond: ConditionCode, progress: u64) {
-        panic!(
-            "ignoring unexpected error in transaction {:?}, condition code {:?}, progress {}",
-            transaction_id, cond, progress
-        );
+    fn ignore_cb(&mut self, fault_info: FaultInfo) {
+        panic!("unexpected ignore, {:?}", fault_info);
     }
 }
 
@@ -261,7 +240,7 @@ impl UdpServer {
             while let Ok(tm) = receiver.try_recv() {
                 debug!("Sending PDU: {:?}", tm);
                 pdu_printout(&tm);
-                let result = self.socket.send_to(tm.pdu(), self.remote_addr());
+                let result = self.socket.send_to(tm.raw_pdu(), self.remote_addr());
                 if let Err(e) = result {
                     warn!("Sending TM with UDP socket failed: {e}")
                 }
@@ -284,7 +263,7 @@ fn pdu_printout(pdu: &PduOwnedWithInfo) {
             spacepackets::cfdp::pdu::FileDirectiveType::AckPdu => (),
             spacepackets::cfdp::pdu::FileDirectiveType::MetadataPdu => {
                 let meta_pdu =
-                    MetadataPduReader::new(pdu.pdu()).expect("creating metadata pdu failed");
+                    MetadataPduReader::new(pdu.raw_pdu()).expect("creating metadata pdu failed");
                 debug!("Metadata PDU: {:?}", meta_pdu)
             }
             spacepackets::cfdp::pdu::FileDirectiveType::NakPdu => (),
@@ -292,7 +271,8 @@ fn pdu_printout(pdu: &PduOwnedWithInfo) {
             spacepackets::cfdp::pdu::FileDirectiveType::KeepAlivePdu => (),
         },
         spacepackets::cfdp::PduType::FileData => {
-            let fd_pdu = FileDataPdu::from_bytes(pdu.pdu()).expect("creating file data pdu failed");
+            let fd_pdu =
+                FileDataPdu::from_bytes(pdu.raw_pdu()).expect("creating file data pdu failed");
             debug!("File data PDU: {:?}", fd_pdu);
         }
     }
@@ -367,6 +347,7 @@ fn main() {
         NativeFilestore::default(),
         remote_cfg_python,
         StdTimerCreator::default(),
+        LostSegmentsList::default(),
     );
     let mut cfdp_user_dest = ExampleCfdpUser::new(EntityType::Receiving);
 

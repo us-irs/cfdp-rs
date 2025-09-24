@@ -12,13 +12,13 @@ You can run both applications with `-h` to get more information about the availa
 ## Running the Python App
 
 It is recommended to run the Python App in a dedicated virtual environment. For example, on a
-Unix system you can use `python3 -m venv venv` and then `source venv/bin/activate` to create
+Unix system you can use `uv venv` and then `source .venv/bin/activate` to create
 and activate a virtual environment.
 
 After that, you can install the required dependencies using
 
 ```sh
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 and then run the application using `./main.py` or `python3 main.py`.
