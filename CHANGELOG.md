@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 # [unreleased]
 
-# [v0.3.0] 2025-09-??
+# [v0.3.0] 2025-09-25
 
 - Bumped `spacepackets` to v0.16
 - Bumped `defmt` to v1
