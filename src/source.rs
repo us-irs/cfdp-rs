@@ -27,7 +27,7 @@
 //! 4. A Finished PDU will be awaited, for example one generated using
 //!    [spacepackets::cfdp::pdu::finished::FinishedPduCreator].
 //!
-//! ### Acknowledged transfer (*not implemented yet*)
+//! ### Acknowledged transfer
 //!
 //! 4. A EOF ACK packet will be awaited, for example one generated using
 //!    [spacepackets::cfdp::pdu::ack::AckPdu].

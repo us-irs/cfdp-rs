@@ -108,7 +108,8 @@
 //! you could schedule a fixed amount of handlers inside a
 //! [threadpool](https://docs.rs/threadpool/latest/threadpool/).
 #![no_std]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+// Show which crate feature enables conditionally compiled APIs in documentation.
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(any(feature = "std", test))]
