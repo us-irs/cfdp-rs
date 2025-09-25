@@ -327,9 +327,11 @@ pub enum DestError {
 /// Prompt PDUs in addition to ACK PDUs where the acknowledged PDU is the Finished PDU.
 /// All generated packets are sent using the user provided [PduSender].
 ///
-/// The handler requires the [alloc] feature but will allocated all required memory on construction
-/// time. This means that the handler is still suitable for embedded systems where run-time
-/// allocation is prohibited. Furthermore, it uses the [VirtualFilestore] abstraction to allow
+///
+/// The handler has an internal buffer for PDU generation and checksum generation. The size of this
+/// buffer is select via Cargo features and defaults to 2048 bytes. It does not allocate
+/// memory during run-time and thus is suitable for embedded systems where  allocation is
+/// not possible.  Furthermore, it uses the [VirtualFilestore] abstraction to allow
 /// usage on systems without a [std] filesystem.
 ///
 /// This handler is able to deal with file copy operations to directories, similarly to how the
@@ -353,7 +355,7 @@ pub struct DestinationHandler<
     step: core::cell::Cell<TransactionStep>,
     state: State,
     transaction_params: TransactionParams<CountdownInstance>,
-    pdu_and_cksum_buffer: RefCell<alloc::vec::Vec<u8>>,
+    pdu_and_cksum_buffer: RefCell<[u8; crate::buf_len::PACKET_BUF_LEN]>,
     pub pdu_sender: PduSenderInstance,
     pub vfs: VirtualFileStoreInstance,
     pub remote_cfg_table: RemoteConfigStoreInstance,
@@ -379,12 +381,10 @@ impl<PduSenderInstance: PduSender, UserFaultHookInstance: UserFaultHook>
     #[cfg(feature = "std")]
     pub fn new_std(
         local_cfg: LocalEntityConfig<UserFaultHookInstance>,
-        pdu_and_cksum_buf_size: usize,
         pdu_sender: PduSenderInstance,
     ) -> Self {
         Self::new(
             local_cfg,
-            pdu_and_cksum_buf_size,
             pdu_sender,
             crate::filestore::NativeFilestore::default(),
             crate::RemoteConfigStoreStd::default(),
@@ -435,7 +435,6 @@ impl<
     ///   where the standard time APIs might not be available.
     pub fn new(
         local_cfg: LocalEntityConfig<UserFaultHookInstance>,
-        pdu_and_cksum_buf_size: usize,
         pdu_sender: PduSenderInstance,
         vfs: VirtualFilestoreInstance,
         remote_cfg_table: RemoteConfigStoreInstance,
@@ -447,7 +446,7 @@ impl<
             step: Cell::new(TransactionStep::Idle),
             state: State::Idle,
             transaction_params: Default::default(),
-            pdu_and_cksum_buffer: core::cell::RefCell::new(alloc::vec![0; pdu_and_cksum_buf_size]),
+            pdu_and_cksum_buffer: core::cell::RefCell::new([0; crate::buf_len::PACKET_BUF_LEN]),
             pdu_sender,
             vfs,
             remote_cfg_table,
@@ -2328,7 +2327,6 @@ mod tests {
         };
         DestinationHandler::new(
             local_entity_cfg,
-            2048,
             test_packet_sender,
             NativeFilestore::default(),
             basic_remote_cfg_table(LOCAL_ID, 1024, true),
