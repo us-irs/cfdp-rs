@@ -1,9 +1,12 @@
-all: check build embedded clippy fmt docs test coverage
+all: check build embedded clippy check-fmt docs test coverage
 
 clippy:
   cargo clippy -- -D warnings
 
 fmt:
+  cargo fmt --all
+
+check-fmt:
   cargo fmt --all -- --check
 
 check:
@@ -20,7 +23,7 @@ embedded:
   cargo build --target thumbv7em-none-eabihf --no-default-features --features "defmt, packet-buf-1k"
 
 docs:
-  RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --features "serde, defmt"
+  RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --features "serde, defmt" --no-deps
 
 docs-html:
   RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --features "serde, defmt" --open

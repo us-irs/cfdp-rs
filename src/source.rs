@@ -442,12 +442,9 @@ impl<
             return Err(PutRequestError::AlreadyBusy);
         }
         self.put_request_cacher.set(put_request)?;
-        let remote_cfg = self.remote_cfg_table.get(
-            self.put_request_cacher
-                .static_fields
-                .destination_id
-                .value_const(),
-        );
+        let remote_cfg = self
+            .remote_cfg_table
+            .get(self.put_request_cacher.static_fields.destination_id.value());
         if remote_cfg.is_none() {
             return Err(PutRequestError::NoRemoteCfgFound(
                 self.put_request_cacher.static_fields.destination_id,
@@ -495,7 +492,7 @@ impl<
         );
         let create_id = |cached_id: &UnsignedByteField| {
             if larger_entity_width != cached_id.size() {
-                UnsignedByteField::new(larger_entity_width, cached_id.value_const())
+                UnsignedByteField::new(larger_entity_width, cached_id.value())
             } else {
                 *cached_id
             }
@@ -558,22 +555,20 @@ impl<
             .file_directive_type()
             .expect("PDU directive type unexpectedly not set")
         {
-            FileDirectiveType::FinishedPdu => {
+            FileDirectiveType::Finished => {
                 let finished_pdu = FinishedPduReader::new(packet_to_insert.raw_pdu())?;
                 self.handle_finished_pdu(&finished_pdu)?
             }
-            FileDirectiveType::NakPdu => {
+            FileDirectiveType::Nak => {
                 let nak_pdu = NakPduReader::new(packet_to_insert.raw_pdu())?;
                 sent_packets += self.handle_nak_pdu(&nak_pdu)?;
             }
-            FileDirectiveType::KeepAlivePdu => self.handle_keep_alive_pdu(),
-            FileDirectiveType::AckPdu => {
+            FileDirectiveType::KeepAlive => self.handle_keep_alive_pdu(),
+            FileDirectiveType::Ack => {
                 let ack_pdu = AckPdu::from_bytes(packet_to_insert.raw_pdu())?;
                 self.handle_ack_pdu(&ack_pdu)?
             }
-            FileDirectiveType::EofPdu
-            | FileDirectiveType::PromptPdu
-            | FileDirectiveType::MetadataPdu => {
+            FileDirectiveType::Eof | FileDirectiveType::Prompt | FileDirectiveType::Metadata => {
                 return Err(SourceError::CantProcessPacketType {
                     pdu_type: packet_to_insert.pdu_type(),
                     directive_type: packet_to_insert.file_directive_type(),
@@ -898,7 +893,7 @@ impl<
     ) -> Result<(), SourceError> {
         let ack_pdu = AckPdu::new(
             PduHeader::new_for_file_directive(self.transaction_params.pdu_conf, 0),
-            FileDirectiveType::FinishedPdu,
+            FileDirectiveType::Finished,
             condition_code,
             transaction_status,
         )
@@ -1093,7 +1088,7 @@ impl<
         if self.step() != TransactionStep::WaitingForFinished {
             return Err(SourceError::UnexpectedPdu {
                 pdu_type: PduType::FileDirective,
-                directive_type: Some(FileDirectiveType::FinishedPdu),
+                directive_type: Some(FileDirectiveType::Finished),
             });
         }
         // Unwrapping should be fine here, the transfer state is valid when we are not in IDLE
@@ -1122,10 +1117,10 @@ impl<
             // Drop the packet, wrong state to handle it..
             return Err(SourceError::UnexpectedPdu {
                 pdu_type: PduType::FileDirective,
-                directive_type: Some(FileDirectiveType::AckPdu),
+                directive_type: Some(FileDirectiveType::Ack),
             });
         }
-        if ack_pdu.directive_code_of_acked_pdu() == FileDirectiveType::EofPdu {
+        if ack_pdu.directive_code_of_acked_pdu() == FileDirectiveType::Eof {
             self.set_step(TransactionStep::WaitingForFinished);
         } else {
             self.anomalies.invalid_ack_directive_code =
@@ -1550,7 +1545,7 @@ mod tests {
             assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
             assert_eq!(
                 next_pdu.file_directive_type,
-                Some(FileDirectiveType::MetadataPdu)
+                Some(FileDirectiveType::Metadata)
             );
             let metadata_pdu =
                 MetadataPduReader::new(&next_pdu.raw_pdu).expect("invalid metadata PDU format");
@@ -1599,7 +1594,7 @@ mod tests {
         ) {
             let ack_pdu = AckPdu::new(
                 transaction_info.pdu_header,
-                FileDirectiveType::EofPdu,
+                FileDirectiveType::Eof,
                 ConditionCode::NoError,
                 TransactionStatus::Active,
             )
@@ -1616,16 +1611,13 @@ mod tests {
             let next_pdu = self.get_next_sent_pdu().unwrap();
             assert!(self.pdu_queue_empty());
             assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
-            assert_eq!(
-                next_pdu.file_directive_type,
-                Some(FileDirectiveType::AckPdu)
-            );
+            assert_eq!(next_pdu.file_directive_type, Some(FileDirectiveType::Ack));
             let ack_pdu = AckPdu::from_bytes(&next_pdu.raw_pdu).unwrap();
             self.common_pdu_check_for_file_transfer(ack_pdu.pdu_header(), CrcFlag::NoCrc);
             assert_eq!(ack_pdu.condition_code(), ConditionCode::NoError);
             assert_eq!(
                 ack_pdu.directive_code_of_acked_pdu(),
-                FileDirectiveType::FinishedPdu
+                FileDirectiveType::Finished
             );
             assert_eq!(ack_pdu.transaction_status(), TransactionStatus::Active);
         }
@@ -1639,10 +1631,7 @@ mod tests {
         ) {
             let next_pdu = self.get_next_sent_pdu().unwrap();
             assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
-            assert_eq!(
-                next_pdu.file_directive_type,
-                Some(FileDirectiveType::EofPdu)
-            );
+            assert_eq!(next_pdu.file_directive_type, Some(FileDirectiveType::Eof));
             let eof_pdu = EofPdu::from_bytes(&next_pdu.raw_pdu).expect("invalid EOF PDU format");
             self.common_pdu_check_for_file_transfer(eof_pdu.pdu_header(), CrcFlag::NoCrc);
             assert_eq!(eof_pdu.condition_code(), eof_params.condition_code);
@@ -1653,7 +1642,7 @@ mod tests {
                     .pdu_header()
                     .common_pdu_conf()
                     .transaction_seq_num
-                    .value_const(),
+                    .value(),
                 0
             );
             if self.transmission_mode == TransmissionMode::Unacknowledged {
@@ -2031,10 +2020,7 @@ mod tests {
         let eof_pdu = tb
             .get_next_sent_pdu()
             .expect("no EOF PDU generated like expected");
-        assert_eq!(
-            eof_pdu.file_directive_type.unwrap(),
-            FileDirectiveType::EofPdu
-        );
+        assert_eq!(eof_pdu.file_directive_type.unwrap(), FileDirectiveType::Eof);
         let eof_pdu = EofPdu::from_bytes(&eof_pdu.raw_pdu).unwrap();
         assert_eq!(
             eof_pdu.condition_code(),
@@ -2096,7 +2082,7 @@ mod tests {
         assert_eq!(next_packet.pdu_type, PduType::FileDirective);
         assert_eq!(
             next_packet.file_directive_type.unwrap(),
-            FileDirectiveType::EofPdu
+            FileDirectiveType::Eof
         );
         // As specified in 4.11.2.2 of the standard, the file size will be the progress of the
         // file copy operation so far, and the checksum is calculated for that progress.

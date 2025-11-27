@@ -138,7 +138,7 @@ use spacepackets::{
         ChecksumType, ConditionCode, FaultHandlerCode, PduType, TransmissionMode,
         pdu::{FileDirectiveType, PduError, PduHeader},
     },
-    util::{UnsignedByteField, UnsignedEnum},
+    util::UnsignedByteField,
 };
 #[cfg(feature = "std")]
 pub use std_mod::*;
@@ -942,26 +942,26 @@ pub fn determine_packet_target(raw_pdu: &[u8]) -> Result<PacketTarget, PduError>
     let packet_target = match file_directive_type {
         // Section c) of 4.5.3: These PDUs should always be targeted towards the file sender a.k.a.
         // the source handler
-        FileDirectiveType::NakPdu
-        | FileDirectiveType::FinishedPdu
-        | FileDirectiveType::KeepAlivePdu => PacketTarget::SourceEntity,
+        FileDirectiveType::Nak | FileDirectiveType::Finished | FileDirectiveType::KeepAlive => {
+            PacketTarget::SourceEntity
+        }
         // Section b) of 4.5.3: These PDUs should always be targeted towards the file receiver a.k.a.
         // the destination handler
-        FileDirectiveType::MetadataPdu
-        | FileDirectiveType::EofPdu
-        | FileDirectiveType::PromptPdu => PacketTarget::DestEntity,
+        FileDirectiveType::Metadata | FileDirectiveType::Eof | FileDirectiveType::Prompt => {
+            PacketTarget::DestEntity
+        }
         // Section a): Recipient depends of the type of PDU that is being acknowledged. We can simply
         // extract the PDU type from the raw stream. If it is an EOF PDU, this packet is passed to
         // the source handler, for a Finished PDU, it is passed to the destination handler.
-        FileDirectiveType::AckPdu => {
+        FileDirectiveType::Ack => {
             let acked_directive = FileDirectiveType::try_from(raw_pdu[header_len + 1] >> 4)
                 .map_err(|_| PduError::InvalidDirectiveType {
                     found: (raw_pdu[header_len + 1] >> 4),
                     expected: None,
                 })?;
-            if acked_directive == FileDirectiveType::EofPdu {
+            if acked_directive == FileDirectiveType::Eof {
                 PacketTarget::SourceEntity
-            } else if acked_directive == FileDirectiveType::FinishedPdu {
+            } else if acked_directive == FileDirectiveType::Finished {
                 PacketTarget::DestEntity
             } else {
                 // TODO: Maybe a better error? This might be confusing..
@@ -1576,7 +1576,7 @@ pub(crate) mod tests {
         assert!(packet_info.file_directive_type().is_some());
         assert_eq!(
             packet_info.file_directive_type().unwrap(),
-            FileDirectiveType::MetadataPdu
+            FileDirectiveType::Metadata
         );
         assert_eq!(
             packet_info.raw_packet(),
@@ -1623,7 +1623,7 @@ pub(crate) mod tests {
         assert_eq!(packet_info.raw_packet(), &buf[0..eof_pdu.len_written()]);
         assert_eq!(
             packet_info.file_directive_type().unwrap(),
-            FileDirectiveType::EofPdu
+            FileDirectiveType::Eof
         );
     }
 
@@ -1659,7 +1659,7 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
+        let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value().into()).unwrap();
         assert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
         assert_eq!(remote_entity_retrieved.max_packet_len, 1024);
         assert!(remote_entity_retrieved.closure_requested_by_default);
@@ -1668,7 +1668,7 @@ pub(crate) mod tests {
             remote_entity_retrieved.default_crc_type,
             ChecksumType::Crc32
         );
-        let remote_entity_mut = remote_entity_cfg.get_mut(REMOTE_ID.value()).unwrap();
+        let remote_entity_mut = remote_entity_cfg.get_mut(REMOTE_ID.value_raw()).unwrap();
         assert_eq!(remote_entity_mut.entity_id, REMOTE_ID.into());
         let dummy = RemoteEntityConfig::new_with_default_values(
             LOCAL_ID.into(),
@@ -1682,11 +1682,11 @@ pub(crate) mod tests {
             remote_entity_cfg.add_config(&dummy).unwrap_err(),
             RemoteConfigStoreError::Full
         );
-        let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value()).unwrap();
+        let remote_entity_retrieved = remote_entity_cfg.get(REMOTE_ID.value_raw()).unwrap();
         assert_eq!(remote_entity_retrieved.entity_id, REMOTE_ID.into());
         // Does not exist.
-        assert!(remote_entity_cfg.get(LOCAL_ID.value()).is_none());
-        assert!(remote_entity_cfg.get_mut(LOCAL_ID.value()).is_none());
+        assert!(remote_entity_cfg.get(LOCAL_ID.value_raw()).is_none());
+        assert!(remote_entity_cfg.get_mut(LOCAL_ID.value_raw()).is_none());
     }
 
     #[test]
@@ -1711,20 +1711,20 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value()).unwrap();
+        let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value_raw()).unwrap();
         assert_eq!(cfg_0.entity_id, REMOTE_ID.into());
         remote_cfg_provider
             .add_config(&remote_entity_cfg_2)
             .unwrap();
         assert_eq!(remote_cfg_provider.0.len(), 2);
-        let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value()).unwrap();
+        let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value_raw()).unwrap();
         assert_eq!(cfg_1.entity_id, LOCAL_ID.into());
-        assert!(remote_cfg_provider.remove_config(REMOTE_ID.value()));
+        assert!(remote_cfg_provider.remove_config(REMOTE_ID.value_raw()));
         assert_eq!(remote_cfg_provider.0.len(), 1);
-        let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value()).unwrap();
+        let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value_raw()).unwrap();
         cfg_1_mut.default_crc_type = ChecksumType::Crc32C;
-        assert!(!remote_cfg_provider.remove_config(REMOTE_ID.value()));
-        assert!(remote_cfg_provider.get_mut(REMOTE_ID.value()).is_none());
+        assert!(!remote_cfg_provider.remove_config(REMOTE_ID.value_raw()));
+        assert!(remote_cfg_provider.get_mut(REMOTE_ID.value_raw()).is_none());
     }
 
     #[test]
@@ -1749,7 +1749,7 @@ pub(crate) mod tests {
             TransmissionMode::Unacknowledged,
             ChecksumType::Crc32,
         );
-        let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value()).unwrap();
+        let cfg_0 = remote_cfg_provider.get(REMOTE_ID.value_raw()).unwrap();
         assert_eq!(cfg_0.entity_id, REMOTE_ID.into());
         assert!(
             remote_cfg_provider
@@ -1757,14 +1757,14 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(remote_cfg_provider.0.len(), 2);
-        let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value()).unwrap();
+        let cfg_1 = remote_cfg_provider.get(LOCAL_ID.value_raw()).unwrap();
         assert_eq!(cfg_1.entity_id, LOCAL_ID.into());
-        assert!(remote_cfg_provider.remove_config(REMOTE_ID.value()));
+        assert!(remote_cfg_provider.remove_config(REMOTE_ID.value_raw()));
         assert_eq!(remote_cfg_provider.0.len(), 1);
-        let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value()).unwrap();
+        let cfg_1_mut = remote_cfg_provider.get_mut(LOCAL_ID.value_raw()).unwrap();
         cfg_1_mut.default_crc_type = ChecksumType::Crc32C;
-        assert!(!remote_cfg_provider.remove_config(REMOTE_ID.value()));
-        assert!(remote_cfg_provider.get_mut(REMOTE_ID.value()).is_none());
+        assert!(!remote_cfg_provider.remove_config(REMOTE_ID.value_raw()));
+        assert!(remote_cfg_provider.get_mut(REMOTE_ID.value_raw()).is_none());
     }
 
     #[test]

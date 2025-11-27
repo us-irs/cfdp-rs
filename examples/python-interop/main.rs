@@ -28,7 +28,7 @@ use spacepackets::{
         ChecksumType, ConditionCode, TransmissionMode,
         pdu::{PduError, file_data::FileDataPdu, metadata::MetadataPduReader},
     },
-    util::{UnsignedByteFieldU16, UnsignedEnum},
+    util::UnsignedByteFieldU16,
 };
 
 static KILL_APP: AtomicBool = AtomicBool::new(false);
@@ -258,17 +258,17 @@ impl UdpServer {
 fn pdu_printout(pdu: &PduOwnedWithInfo) {
     match pdu.pdu_type() {
         spacepackets::cfdp::PduType::FileDirective => match pdu.file_directive_type().unwrap() {
-            spacepackets::cfdp::pdu::FileDirectiveType::EofPdu => (),
-            spacepackets::cfdp::pdu::FileDirectiveType::FinishedPdu => (),
-            spacepackets::cfdp::pdu::FileDirectiveType::AckPdu => (),
-            spacepackets::cfdp::pdu::FileDirectiveType::MetadataPdu => {
+            spacepackets::cfdp::pdu::FileDirectiveType::Eof => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::Finished => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::Ack => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::Metadata => {
                 let meta_pdu =
                     MetadataPduReader::new(pdu.raw_pdu()).expect("creating metadata pdu failed");
                 debug!("Metadata PDU: {:?}", meta_pdu)
             }
-            spacepackets::cfdp::pdu::FileDirectiveType::NakPdu => (),
-            spacepackets::cfdp::pdu::FileDirectiveType::PromptPdu => (),
-            spacepackets::cfdp::pdu::FileDirectiveType::KeepAlivePdu => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::Nak => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::Prompt => (),
+            spacepackets::cfdp::pdu::FileDirectiveType::KeepAlive => (),
         },
         spacepackets::cfdp::PduType::FileData => {
             let fd_pdu =
