@@ -36,6 +36,7 @@
 //! 6. A finished PDU ACK packet will be generated to be sent to the remote CFDP entity.
 //!    The [spacepackets::cfdp::pdu::finished::FinishedPduReader] can be used to inspect the
 //!    generated PDU.
+#![deny(missing_docs)]
 use core::{
     cell::{Cell, RefCell},
     ops::ControlFlow,
@@ -84,29 +85,42 @@ use super::{
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TransactionStep {
+    /// Idle state, nothing to do.
     Idle = 0,
+    /// Transaction has started.
     TransactionStart = 1,
+    /// Sending Metadata PDU.
     SendingMetadata = 3,
+    /// Sending file data PDUs.
     SendingFileData = 4,
     /// Re-transmitting missing packets in acknowledged mode
     Retransmitting = 5,
+    /// Sending an EOF PDU.
     SendingEof = 6,
+    /// Waiting for the acknowledgement of the EOF PDU.
     WaitingForEofAck = 7,
+    /// Waiting for the Finished PDU from the receiver.
     WaitingForFinished = 8,
+    /// Performing the notice of completion.
     NoticeOfCompletion = 10,
 }
 
+/// Parameter related to the file transfer.
 #[derive(Default, Debug, Copy, Clone)]
-pub struct FileParams {
-    pub progress: u64,
-    pub segment_len: u64,
-    pub crc32: u32,
-    pub metadata_only: bool,
-    pub file_size: u64,
-    pub empty_file: bool,
+struct FileParams {
+    /// Progress of the file transfer.
+    progress: u64,
+    /// Segment length for a single file segment which is limited by various factors.
+    segment_len: u64,
+    /// Metadata only flag.
+    metadata_only: bool,
+    /// File size.
+    file_size: u64,
+    /// Empty file flag.
+    empty_file: bool,
     /// The checksum is cached to avoid expensive re-calculation when the EOF PDU needs to be
     /// re-sent.
-    pub checksum_completed_file: Option<u32>,
+    checksum_completed_file: Option<u32>,
 }
 
 // Explicit choice to put all simple internal fields into Cells.
@@ -137,6 +151,7 @@ impl StateHelper {
     }
 }
 
+/// Parameters related to the Finished PDU.
 #[derive(Debug, Copy, Clone)]
 pub struct FinishedParams {
     condition_code: ConditionCode,
@@ -144,68 +159,98 @@ pub struct FinishedParams {
     file_status: FileStatus,
 }
 
+/// Source handler errors.
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
+    /// Can not process the passed packet type.
     #[error("can not process packet type {pdu_type:?} with directive type {directive_type:?}")]
     CantProcessPacketType {
+        /// PDU type.
         pdu_type: PduType,
+        /// Directive type, if applicable.
         directive_type: Option<FileDirectiveType>,
     },
+    /// Unexpected PDU for current state.
     #[error("unexpected PDU")]
     UnexpectedPdu {
+        /// PDU type.
         pdu_type: PduType,
+        /// Directive type, if applicable.
         directive_type: Option<FileDirectiveType>,
     },
+    /// Put request is already active.
     #[error("source handler is already busy with put request")]
     PutRequestAlreadyActive,
+    /// Error during the caching process of a put request.
     #[error("error caching put request")]
     PutRequestCaching(ByteConversionError),
+    /// Generic filestore error.
     #[error("filestore error: {0}")]
     FilestoreError(#[from] FilestoreError),
+    /// Source file name is not valid UTF-8.
     #[error("source file does not have valid UTF8 format: {0}")]
     SourceFileNotValidUtf8(Utf8Error),
+    /// Destination file name is not valid UTF-8.
     #[error("destination file does not have valid UTF8 format: {0}")]
     DestFileNotValidUtf8(Utf8Error),
+    /// Invalid NAK PDU error.
     #[error("invalid NAK PDU received")]
     InvalidNakPdu,
+    /// PDU creation error.
     #[error("error related to PDU creation: {0}")]
     Pdu(#[from] PduError),
+    /// Feature not implemented error.
     #[error("cfdp feature not implemented")]
     NotImplemented,
+    /// Generic send error.
     #[error("issue sending PDU: {0}")]
     SendError(#[from] GenericSendError),
 }
 
+/// Put request errors.
 #[derive(Debug, thiserror::Error)]
 pub enum PutRequestError {
+    /// Storage error.
     #[error("error caching put request: {0}")]
     Storage(#[from] ByteConversionError),
+    /// Already busy with a put request.
     #[error("already busy with put request")]
     AlreadyBusy,
+    /// No remote entity configuration was found for destination ID.
     #[error("no remote entity configuration found for {0:?}")]
     NoRemoteCfgFound(UnsignedByteField),
+    /// Source file name is not valid UTF-8.
     #[error("source file does not have valid UTF8 format: {0}")]
     SourceFileNotValidUtf8(#[from] Utf8Error),
+    /// File does not exist.
     #[error("source file does not exist")]
     FileDoesNotExist,
+    /// Generic filestore error.
     #[error("filestore error: {0}")]
     FilestoreError(#[from] FilestoreError),
 }
 
+/// Anomaly tracker for the source handler.
+///
+/// Anomalies are unexpected events which are not severe errors.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AnomalyTracker {
     invalid_ack_directive_code: u8,
 }
 
+/// Finite state-machine context.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub enum FsmContext {
+enum FsmContext {
+    /// None
     #[default]
     None,
+    /// The FSM should be reset when possible.
     ResetWhenPossible,
 }
 
+/// Transaction parameters.
 #[derive(Debug)]
-pub struct TransactionParams<CountdownInstance: Countdown> {
+struct TransactionParams<CountdownInstance: Countdown> {
     transaction_id: Option<TransactionId>,
     remote_cfg: Option<RemoteEntityConfig>,
     transmission_mode: Option<super::TransmissionMode>,
@@ -399,6 +444,9 @@ impl<
         }
     }
 
+    /// Transcation ID for the currently active transaction.
+    ///
+    /// Returns [None] if no transaction is active.
     #[inline]
     pub fn transaction_id(&self) -> Option<TransactionId> {
         self.transaction_params.transaction_id
@@ -417,11 +465,13 @@ impl<
         self.state_helper.step.get()
     }
 
+    /// Current state of the source handler.
     #[inline]
     pub fn state(&self) -> State {
         self.state_helper.state.get()
     }
 
+    /// Local configuration of the source handler.
     #[inline]
     pub fn local_cfg(&self) -> &LocalEntityConfig<UserFaultHookInstance> {
         &self.local_cfg
@@ -1129,6 +1179,9 @@ impl<
         Ok(())
     }
 
+    /// Manually trigger a notice of cancellation.
+    ///
+    /// This cancels any currently active transaction.
     pub fn notice_of_cancellation(
         &mut self,
         user: &mut impl CfdpUser,
@@ -1174,12 +1227,18 @@ impl<
         }
     }
 
+    /// Manually trigger a notice of suspension.
+    ///
+    /// Please note that proper susopension handling is not implemented yet.
     pub fn notice_of_suspension(&mut self) {
         self.notice_of_suspension_internal();
     }
 
-    fn notice_of_suspension_internal(&self) {}
+    fn notice_of_suspension_internal(&self) {
+        // TODO: Implement.
+    }
 
+    /// Manually abandon the currently active transaction.
     pub fn abandon_transaction(&mut self) {
         // I guess an abandoned transaction just stops whatever the handler is doing and resets
         // it to a clean state.. The implementation for this is quite easy.
