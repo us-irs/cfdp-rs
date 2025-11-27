@@ -62,7 +62,7 @@ use spacepackets::{
         },
         tlv::{EntityIdTlv, GenericTlv, ReadableTlv, TlvType, msg_to_user::MsgToUserTlv},
     },
-    util::{UnsignedByteField, UnsignedEnum},
+    util::UnsignedByteField,
 };
 
 #[derive(Debug)]
@@ -608,33 +608,31 @@ impl<
     ) -> Result<u32, DestError> {
         let mut sent_packets = 0;
         match pdu_directive {
-            FileDirectiveType::EofPdu => {
+            FileDirectiveType::Eof => {
                 let eof_pdu = EofPdu::from_bytes(raw_packet)?;
                 sent_packets += self.handle_eof_pdu(cfdp_user, eof_pdu)?
             }
-            FileDirectiveType::FinishedPdu
-            | FileDirectiveType::NakPdu
-            | FileDirectiveType::KeepAlivePdu => {
+            FileDirectiveType::Finished | FileDirectiveType::Nak | FileDirectiveType::KeepAlive => {
                 return Err(DestError::CantProcessPacketType {
                     pdu_type: PduType::FileDirective,
                     directive_type: Some(pdu_directive),
                 });
             }
-            FileDirectiveType::AckPdu => {
+            FileDirectiveType::Ack => {
                 let ack_pdu = AckPdu::from_bytes(raw_packet)?;
                 self.handle_ack_pdu(ack_pdu)?;
             }
-            FileDirectiveType::MetadataPdu => {
+            FileDirectiveType::Metadata => {
                 let metadata_pdu = MetadataPduReader::from_bytes(raw_packet)?;
                 self.handle_metadata_pdu(metadata_pdu)?
             }
-            FileDirectiveType::PromptPdu => self.handle_prompt_pdu(raw_packet)?,
+            FileDirectiveType::Prompt => self.handle_prompt_pdu(raw_packet)?,
         };
         Ok(sent_packets)
     }
 
     fn handle_ack_pdu(&mut self, ack_pdu: AckPdu) -> Result<(), DestError> {
-        if ack_pdu.directive_code_of_acked_pdu() != FileDirectiveType::FinishedPdu {
+        if ack_pdu.directive_code_of_acked_pdu() != FileDirectiveType::Finished {
             self.transaction_params
                 .anomaly_tracker
                 .increment_invalid_ack_directive_code();
@@ -827,7 +825,7 @@ impl<
                 .finish(0, self.transaction_params.progress)
                 .map_err(PduError::from)?;
             self.pdu_sender.send_file_directive_pdu(
-                FileDirectiveType::NakPdu,
+                FileDirectiveType::Nak,
                 &self.pdu_and_cksum_buffer.borrow()[0..written_size],
             )?;
             packets_sent += 1;
@@ -954,7 +952,7 @@ impl<
                 };
                 let written_len = nak_pdu.write_to_bytes(self.pdu_and_cksum_buffer.get_mut())?;
                 self.pdu_sender.send_file_directive_pdu(
-                    FileDirectiveType::NakPdu,
+                    FileDirectiveType::Nak,
                     &self.pdu_and_cksum_buffer.borrow()[0..written_len],
                 )?;
                 sent_packets += 1;
@@ -998,7 +996,7 @@ impl<
             if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
                 return Err(DestError::WrongStepForPdu {
                     pdu_type: PduType::FileDirective,
-                    file_directive_type: Some(FileDirectiveType::EofPdu),
+                    file_directive_type: Some(FileDirectiveType::Eof),
                     step: self.step(),
                 });
             }
@@ -1116,7 +1114,7 @@ impl<
         );
         let written_len = ack_pdu.write_to_bytes(self.pdu_and_cksum_buffer.get_mut())?;
         self.pdu_sender.send_file_directive_pdu(
-            FileDirectiveType::AckPdu,
+            FileDirectiveType::Ack,
             &self.pdu_and_cksum_buffer.borrow()[0..written_len],
         )?;
         Ok(())
@@ -1280,7 +1278,7 @@ impl<
                 .finish(0, self.transaction_params.file_size)
                 .map_err(PduError::from)?;
             self.pdu_sender.send_file_directive_pdu(
-                FileDirectiveType::NakPdu,
+                FileDirectiveType::Nak,
                 &self.pdu_and_cksum_buffer.borrow()[0..written_len],
             )?;
             sent_packets += 1;
@@ -1336,7 +1334,7 @@ impl<
                     .finish(current_start_of_scope, current_end_of_scope)
                     .map_err(PduError::from)?;
                 self.pdu_sender.send_file_directive_pdu(
-                    FileDirectiveType::NakPdu,
+                    FileDirectiveType::Nak,
                     &self.pdu_and_cksum_buffer.borrow()[..written_len],
                 )?;
                 sent_packets += 1;
@@ -1382,7 +1380,7 @@ impl<
                 .finish(current_start_of_scope, current_end_of_scope)
                 .map_err(PduError::from)?;
             self.pdu_sender.send_file_directive_pdu(
-                FileDirectiveType::NakPdu,
+                FileDirectiveType::Nak,
                 &self.pdu_and_cksum_buffer.borrow()[..written_len],
             )?;
             sent_packets += 1;
@@ -1898,7 +1896,7 @@ impl<
         };
         finished_pdu.write_to_bytes(self.pdu_and_cksum_buffer.get_mut())?;
         self.pdu_sender.send_file_directive_pdu(
-            FileDirectiveType::FinishedPdu,
+            FileDirectiveType::Finished,
             &self.pdu_and_cksum_buffer.borrow()[0..finished_pdu.len_written()],
         )?;
         Ok(1)
@@ -1926,7 +1924,7 @@ mod tests {
                 nak::NakPduReader,
             },
         },
-        util::UnsignedByteFieldU8,
+        util::{UnsignedByteFieldU8, UnsignedEnum},
     };
 
     use crate::{
@@ -2053,7 +2051,7 @@ mod tests {
         fn remote_cfg_mut(&mut self) -> &mut RemoteEntityConfig {
             self.handler
                 .remote_cfg_table
-                .get_mut(LOCAL_ID.value())
+                .get_mut(LOCAL_ID.value_raw())
                 .unwrap()
         }
 
@@ -2214,13 +2212,13 @@ mod tests {
             assert!(!self.pdu_queue_empty());
             let pdu = self.get_next_pdu().unwrap();
             assert_eq!(pdu.pdu_type, PduType::FileDirective);
-            assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::AckPdu);
+            assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Ack);
             let ack_pdu = AckPdu::from_bytes(&pdu.raw_pdu).unwrap();
             assert_eq!(ack_pdu.condition_code(), cond_code);
             assert_eq!(ack_pdu.transaction_status(), TransactionStatus::Active);
             assert_eq!(
                 ack_pdu.directive_code_of_acked_pdu(),
-                FileDirectiveType::EofPdu
+                FileDirectiveType::Eof
             );
         }
 
@@ -2229,7 +2227,7 @@ mod tests {
             assert_eq!(pdu.pdu_type, PduType::FileDirective);
             assert_eq!(
                 pdu.file_directive_type.unwrap(),
-                FileDirectiveType::FinishedPdu
+                FileDirectiveType::Finished
             );
             let finished_pdu = FinishedPduReader::from_bytes(&pdu.raw_pdu).unwrap();
             assert_eq!(finished_pdu.delivery_code(), DeliveryCode::Complete);
@@ -2248,7 +2246,7 @@ mod tests {
             assert_eq!(pdu.pdu_type, PduType::FileDirective);
             assert_eq!(
                 pdu.file_directive_type.unwrap(),
-                FileDirectiveType::FinishedPdu
+                FileDirectiveType::Finished
             );
             let finished_pdu = FinishedPduReader::from_bytes(&pdu.raw_pdu).unwrap();
             assert_eq!(finished_pdu.delivery_code(), delivery_code);
@@ -2764,7 +2762,7 @@ mod tests {
         assert_eq!(sent_pdu.pdu_type, PduType::FileDirective);
         assert_eq!(
             sent_pdu.file_directive_type,
-            Some(FileDirectiveType::FinishedPdu)
+            Some(FileDirectiveType::Finished)
         );
         let finished_pdu = FinishedPduReader::from_bytes(&sent_pdu.raw_pdu).unwrap();
         assert_eq!(finished_pdu.file_status(), FileStatus::Retained);
@@ -2826,7 +2824,7 @@ mod tests {
         } = error
         {
             assert_eq!(pdu_type, PduType::FileDirective);
-            assert_eq!(directive_type, Some(FileDirectiveType::FinishedPdu));
+            assert_eq!(directive_type, Some(FileDirectiveType::Finished));
         }
     }
 
@@ -2938,7 +2936,7 @@ mod tests {
         assert_eq!(sent_pdu.pdu_type, PduType::FileDirective);
         assert_eq!(
             sent_pdu.file_directive_type,
-            Some(FileDirectiveType::FinishedPdu)
+            Some(FileDirectiveType::Finished)
         );
         let finished_pdu = FinishedPduReader::from_bytes(&sent_pdu.raw_pdu).unwrap();
         assert_eq!(finished_pdu.file_status(), FileStatus::Retained);
@@ -3083,7 +3081,7 @@ mod tests {
             assert_eq!(finished_pdu.pdu_type, PduType::FileDirective);
             assert_eq!(
                 finished_pdu.file_directive_type.unwrap(),
-                FileDirectiveType::FinishedPdu
+                FileDirectiveType::Finished
             );
             let finished_pdu = FinishedPduReader::from_bytes(&finished_pdu.raw_pdu).unwrap();
             assert_eq!(
@@ -3197,7 +3195,7 @@ mod tests {
         assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
         assert_eq!(
             next_pdu.file_directive_type.unwrap(),
-            FileDirectiveType::FinishedPdu
+            FileDirectiveType::Finished
         );
         let finished_pdu =
             FinishedPduReader::new(&next_pdu.raw_pdu).expect("finished pdu read failed");
@@ -3249,7 +3247,7 @@ mod tests {
         assert_eq!(next_pdu.pdu_type, PduType::FileDirective);
         assert_eq!(
             next_pdu.file_directive_type.unwrap(),
-            FileDirectiveType::FinishedPdu
+            FileDirectiveType::Finished
         );
         let finished_pdu =
             FinishedPduReader::new(&next_pdu.raw_pdu).expect("finished pdu read failed");
@@ -3284,7 +3282,7 @@ mod tests {
         let remote_cfg_mut = tb
             .handler
             .remote_cfg_table
-            .get_mut(LOCAL_ID.value())
+            .get_mut(LOCAL_ID.value_raw())
             .unwrap();
         remote_cfg_mut.disposition_on_cancellation = true;
         let mut user = tb.test_user_from_cached_paths(0);
@@ -3322,7 +3320,7 @@ mod tests {
         let remote_cfg_mut = tb
             .handler
             .remote_cfg_table
-            .get_mut(LOCAL_ID.value())
+            .get_mut(LOCAL_ID.value_raw())
             .unwrap();
         remote_cfg_mut.disposition_on_cancellation = true;
         let mut user = tb.test_user_from_cached_paths(file_size);
@@ -3378,7 +3376,7 @@ mod tests {
         assert_eq!(tb.pdu_queue_len(), 1);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.pdu_header().common_pdu_conf().file_flag, file_flag);
         assert_eq!(nak_pdu.start_of_scope(), 0);
@@ -3444,7 +3442,7 @@ mod tests {
         assert_eq!(tb.pdu_queue_len(), 1);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -3494,7 +3492,7 @@ mod tests {
         assert_eq!(tb.pdu_queue_len(), 1);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -3552,7 +3550,7 @@ mod tests {
         tb.check_eof_ack_pdu(ConditionCode::NoError);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -3614,7 +3612,7 @@ mod tests {
         assert_eq!(tb.pdu_queue_len(), 1);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -3628,7 +3626,7 @@ mod tests {
         assert_eq!(tb.pdu_queue_len(), 1);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -3842,7 +3840,7 @@ mod tests {
         assert_eq!(tb.pdu_queue_len(), 1);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -3926,7 +3924,7 @@ mod tests {
         tb.check_eof_ack_pdu(ConditionCode::NoError);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), 10);
@@ -3935,7 +3933,7 @@ mod tests {
 
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 10);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
@@ -4036,7 +4034,7 @@ mod tests {
         tb.check_eof_ack_pdu(ConditionCode::NoError);
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 0);
         assert_eq!(nak_pdu.end_of_scope(), 14);
@@ -4045,7 +4043,7 @@ mod tests {
 
         let pdu = tb.get_next_pdu().unwrap();
         assert_eq!(pdu.pdu_type, PduType::FileDirective);
-        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::NakPdu);
+        assert_eq!(pdu.file_directive_type.unwrap(), FileDirectiveType::Nak);
         let nak_pdu = NakPduReader::new(&pdu.raw_pdu).unwrap();
         assert_eq!(nak_pdu.start_of_scope(), 14);
         assert_eq!(nak_pdu.end_of_scope(), file_size);
