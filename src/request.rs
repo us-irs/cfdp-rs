@@ -1,3 +1,5 @@
+//! # Request module
+#![deny(missing_docs)]
 use core::str::Utf8Error;
 
 use spacepackets::{
@@ -12,6 +14,9 @@ use spacepackets::{
 #[cfg(feature = "alloc")]
 pub use alloc_mod::*;
 
+/// File path is too large.
+///
+/// The file path length is limited to 255 bytes.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -20,36 +25,56 @@ pub struct FilePathTooLarge(pub usize);
 /// This trait is an abstraction for different Put Request structures which can be used
 /// by Put Request consumers.
 pub trait ReadablePutRequest {
+    /// Destination entity ID.
     fn destination_id(&self) -> UnsignedByteField;
+    /// Source file path.
     fn source_file(&self) -> Option<&str>;
+    /// Destination file path.
     fn dest_file(&self) -> Option<&str>;
+    /// Transmission mode if explicitely specified.
     fn trans_mode(&self) -> Option<TransmissionMode>;
+    /// Closure is requested for unacknowledged file transfer.
     fn closure_requested(&self) -> Option<bool>;
+    /// Segmentation control.
     fn seg_ctrl(&self) -> Option<SegmentationControl>;
 
+    /// Iterator over Messages to User TLVs, if any are supplied.
     fn msgs_to_user(&self) -> Option<impl Iterator<Item = Tlv<'_>>>;
+    /// Iterator over fault handler override TLVs, if any are supplied.
     fn fault_handler_overrides(&self) -> Option<impl Iterator<Item = Tlv<'_>>>;
+    /// Flow label TLV, if it is supplied.
     fn flow_label(&self) -> Option<Tlv<'_>>;
+    /// Iterator over filestore request TLVs, if any are supplied.
     fn fs_requests(&self) -> Option<impl Iterator<Item = Tlv<'_>>>;
 }
 
+/// Put request structure.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PutRequest<'src_file, 'dest_file, 'msgs_to_user, 'fh_ovrds, 'flow_label, 'fs_requests> {
+    /// Destination entity ID.
     pub destination_id: UnsignedByteField,
     source_file: Option<&'src_file str>,
     dest_file: Option<&'dest_file str>,
+    /// Transmission mode.
     pub trans_mode: Option<TransmissionMode>,
+    /// Closure requested flag for unacknowledged file transfer.
     pub closure_requested: Option<bool>,
+    /// Segmentation control.
     pub seg_ctrl: Option<SegmentationControl>,
+    /// Messages to user TLVs.
     pub msgs_to_user: Option<&'msgs_to_user [Tlv<'msgs_to_user>]>,
+    /// Fault handler override TLVs.
     pub fault_handler_overrides: Option<&'fh_ovrds [Tlv<'fh_ovrds>]>,
+    /// Flow label TLV.
     pub flow_label: Option<Tlv<'flow_label>>,
+    /// Filestore request TLVs.
     pub fs_requests: Option<&'fs_requests [Tlv<'fs_requests>]>,
 }
 
 impl<'src_file, 'dest_file, 'msgs_to_user, 'fh_ovrds, 'flow_label, 'fs_requests>
     PutRequest<'src_file, 'dest_file, 'msgs_to_user, 'fh_ovrds, 'flow_label, 'fs_requests>
 {
+    /// Create a new put request with all possible fields.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         destination_id: UnsignedByteField,
@@ -130,6 +155,9 @@ impl ReadablePutRequest for PutRequest<'_, '_, '_, '_, '_, '_> {
     }
 }
 
+/// Generic path checks.
+///
+/// This only checks the length of the paths.
 pub fn generic_path_checks(
     source_file: Option<&str>,
     dest_file: Option<&str>,
@@ -148,6 +176,7 @@ pub fn generic_path_checks(
 }
 
 impl<'src_file, 'dest_file> PutRequest<'src_file, 'dest_file, 'static, 'static, 'static, 'static> {
+    /// New regular put request with no additional TLVs.
     pub fn new_regular_request(
         dest_id: UnsignedByteField,
         source_file: &'src_file str,
@@ -171,12 +200,14 @@ impl<'src_file, 'dest_file> PutRequest<'src_file, 'dest_file, 'static, 'static, 
     }
 }
 
+/// TLV has invalid type.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TlvWithInvalidType(pub(crate) ());
 
 impl<'msgs_to_user> PutRequest<'static, 'static, 'msgs_to_user, 'static, 'static, 'static> {
+    /// New put request which only contains messages to the user TLVs.
     pub fn new_msgs_to_user_only(
         dest_id: UnsignedByteField,
         msgs_to_user: &'msgs_to_user [Tlv<'msgs_to_user>],
@@ -212,6 +243,7 @@ impl<'msgs_to_user> PutRequest<'static, 'static, 'msgs_to_user, 'static, 'static
     }
 }
 
+/// Generic check of the TLV list type.
 pub fn generic_tlv_list_type_check<TlvProvider: GenericTlv>(
     opt_tlvs: Option<&[TlvProvider]>,
     tlv_type: TlvType,
@@ -229,7 +261,9 @@ pub fn generic_tlv_list_type_check<TlvProvider: GenericTlv>(
     true
 }
 
+/// Structure for all static put request fields.
 pub struct StaticPutRequestFields {
+    /// Destination entity ID.
     pub destination_id: UnsignedByteField,
     /// Static buffer to store source file path.
     pub source_file_buf: [u8; u8::MAX as usize],
@@ -239,8 +273,11 @@ pub struct StaticPutRequestFields {
     pub dest_file_buf: [u8; u8::MAX as usize],
     /// Current destination path length.
     pub dest_file_len: usize,
+    /// Transmission mode.
     pub trans_mode: Option<TransmissionMode>,
+    /// Closure requested flag for unacknowledged file transfer.
     pub closure_requested: Option<bool>,
+    /// Segmentation control.
     pub seg_ctrl: Option<SegmentationControl>,
 }
 
@@ -260,6 +297,7 @@ impl Default for StaticPutRequestFields {
 }
 
 impl StaticPutRequestFields {
+    /// Clears and resets the fields.
     pub fn clear(&mut self) {
         self.destination_id = UnsignedByteField::new(0, 0);
         self.source_file_len = 0;
@@ -271,9 +309,11 @@ impl StaticPutRequestFields {
 }
 
 /// This is a put request cache structure which can be used to cache [ReadablePutRequest]s
-/// without requiring run-time allocation. The user must specify the static buffer sizes used
-/// to store TLVs or list of TLVs.
+/// without requiring run-time allocation.
+///
+/// The user must specify the static buffer sizes used to store TLVs or list of TLVs.
 pub struct StaticPutRequestCacher<const BUF_SIZE: usize> {
+    /// Static fields.
     pub static_fields: StaticPutRequestFields,
     opts_buf: [u8; BUF_SIZE],
     opts_len: usize,
@@ -286,6 +326,7 @@ impl<const BUF_SIZE: usize> Default for StaticPutRequestCacher<BUF_SIZE> {
 }
 
 impl<const BUF_SIZE: usize> StaticPutRequestCacher<BUF_SIZE> {
+    /// Constructor.
     pub fn new() -> Self {
         Self {
             static_fields: StaticPutRequestFields::default(),
@@ -294,6 +335,7 @@ impl<const BUF_SIZE: usize> StaticPutRequestCacher<BUF_SIZE> {
         }
     }
 
+    /// Set and update with using any generic [ReadablePutRequest].
     pub fn set(
         &mut self,
         put_request: &impl ReadablePutRequest,
@@ -352,28 +394,34 @@ impl<const BUF_SIZE: usize> StaticPutRequestCacher<BUF_SIZE> {
         Ok(())
     }
 
+    /// Does the put request have a source file?
     pub fn has_source_file(&self) -> bool {
         self.static_fields.source_file_len > 0
     }
 
+    /// Does the put request have a destination file?
     pub fn has_dest_file(&self) -> bool {
         self.static_fields.dest_file_len > 0
     }
 
+    /// Source file path.
     pub fn source_file(&self) -> Result<&str, Utf8Error> {
         core::str::from_utf8(
             &self.static_fields.source_file_buf[0..self.static_fields.source_file_len],
         )
     }
 
+    /// Destination file path.
     pub fn dest_file(&self) -> Result<&str, Utf8Error> {
         core::str::from_utf8(&self.static_fields.dest_file_buf[0..self.static_fields.dest_file_len])
     }
 
+    /// Length of stored options TLVs.
     pub fn opts_len(&self) -> usize {
         self.opts_len
     }
 
+    /// Raw options slice.
     pub fn opts_slice(&self) -> &[u8] {
         &self.opts_buf[0..self.opts_len]
     }
@@ -388,6 +436,7 @@ impl<const BUF_SIZE: usize> StaticPutRequestCacher<BUF_SIZE> {
     }
 }
 
+/// [alloc] support module.
 #[cfg(feature = "alloc")]
 pub mod alloc_mod {
 
@@ -400,19 +449,28 @@ pub mod alloc_mod {
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[cfg_attr(feature = "defmt", derive(defmt::Format))]
     pub struct PutRequestOwned {
+        /// Destination entity ID.
         pub destination_id: UnsignedByteField,
         source_file: Option<alloc::string::String>,
         dest_file: Option<alloc::string::String>,
+        /// Transmission mode.
         pub trans_mode: Option<TransmissionMode>,
+        /// Closure requested flag for unacknowledged file transfer.
         pub closure_requested: Option<bool>,
+        /// Segmentation control.
         pub seg_ctrl: Option<SegmentationControl>,
+        /// Messages to user TLVs.
         pub msgs_to_user: Option<alloc::vec::Vec<TlvOwned>>,
+        /// Fault handler override TLVs.
         pub fault_handler_overrides: Option<alloc::vec::Vec<TlvOwned>>,
+        /// Flow label TLV.
         pub flow_label: Option<TlvOwned>,
+        /// Filestore request TLVs.
         pub fs_requests: Option<alloc::vec::Vec<TlvOwned>>,
     }
 
     impl PutRequestOwned {
+        /// New regular put request with no additional TLVs.
         pub fn new_regular_request(
             dest_id: UnsignedByteField,
             source_file: &str,
@@ -440,6 +498,7 @@ pub mod alloc_mod {
             })
         }
 
+        /// New put request which only contains messages to the user TLVs.
         pub fn new_msgs_to_user_only(
             dest_id: UnsignedByteField,
             msgs_to_user: &[MsgToUserTlv<'_>],
