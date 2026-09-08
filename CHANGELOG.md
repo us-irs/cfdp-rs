@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 # [unreleased]
 
-- Bumped `spacepackets` to v0.17
+- Bumped `spacepackets` to v0.18
+
+## Fixed
+
+- Destination handler's `TransactionParams::reset` now resets all fields instead of just two.
+  The incomplete reset left stale acknowledged-mode state behind, so a new transaction's Metadata
+  PDU was mistaken for a duplicate of an already-processed one and silently dropped, breaking
+  every transfer after the first one on a given destination handler instance.
 
 # [v0.3.0] 2025-09-25
 

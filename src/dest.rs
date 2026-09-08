@@ -257,8 +257,7 @@ impl<CheckTimer: Countdown> Default for TransactionParams<CheckTimer> {
 
 impl<CheckTimer: Countdown> TransactionParams<CheckTimer> {
     fn reset(&mut self) {
-        self.finished_params.reset();
-        self.anomaly_tracker.reset();
+        *self = Self::default();
     }
 }
 
