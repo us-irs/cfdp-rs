@@ -287,8 +287,7 @@ impl<CountdownInstance: Countdown> Default for TransactionParams<CountdownInstan
 impl<CountdownInstance: Countdown> TransactionParams<CountdownInstance> {
     #[inline]
     fn reset(&mut self) {
-        self.transaction_id = None;
-        self.transmission_mode = None;
+        *self = Self::default();
     }
 }
 
@@ -826,16 +825,22 @@ impl<
     }
 
     fn eof_fsm(&mut self, user: &mut impl CfdpUser) -> Result<(), SourceError> {
-        let checksum = self.vfs.calculate_checksum(
-            self.put_request_cacher.source_file().unwrap(),
-            self.transaction_params
-                .remote_cfg
-                .as_ref()
-                .unwrap()
-                .default_crc_type,
-            self.transaction_params.file_params.file_size,
-            self.pdu_and_cksum_buffer.borrow_mut().as_mut_slice(),
-        )?;
+        // A metadata-only transaction (e.g. a Proxy Put Request) has no source file to read, so
+        // there is nothing to checksum: it always transfers zero bytes.
+        let checksum = if self.transaction_params.file_params.metadata_only {
+            0
+        } else {
+            self.vfs.calculate_checksum(
+                self.put_request_cacher.source_file().unwrap(),
+                self.transaction_params
+                    .remote_cfg
+                    .as_ref()
+                    .unwrap()
+                    .default_crc_type,
+                self.transaction_params.file_params.file_size,
+                self.pdu_and_cksum_buffer.borrow_mut().as_mut_slice(),
+            )?
+        };
         self.transaction_params.file_params.checksum_completed_file = Some(checksum);
         self.prepare_and_send_eof_pdu(user, checksum)?;
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
@@ -982,22 +987,19 @@ impl<
         {
             return Ok(ControlFlow::Break(1));
         }
+        // Per CCSDS 727.0-B-5 4.6.1.1.9, an EOF (No error) PDU is required once the Metadata
+        // PDU and all File Data PDUs have been issued, including case (C): no file is to be
+        // sent at all (a metadata-only transaction, e.g. a Proxy Put Request). A metadata-only
+        // transaction always has progress == file_size == 0, so it naturally falls into this
+        // branch already - there is deliberately no separate `metadata_only` case here.
         if self.transaction_params.file_params.empty_file
             || self.transaction_params.file_params.progress
                 >= self.transaction_params.file_params.file_size
         {
-            // EOF is still expected.
             self.set_step(TransactionStep::SendingEof);
             self.transaction_params
                 .cond_code_eof
                 .set(Some(ConditionCode::NoError));
-        } else if self.transaction_params.file_params.metadata_only {
-            // Special case: Metadata Only, no EOF required.
-            if self.transaction_params.closure_requested {
-                self.set_step(TransactionStep::WaitingForFinished);
-            } else {
-                self.set_step(TransactionStep::NoticeOfCompletion);
-            }
         }
         Ok(ControlFlow::Continue(()))
     }
@@ -1194,17 +1196,22 @@ impl<
             .cond_code_eof
             .set(Some(condition_code));
         // As specified in 4.11.2.2, prepare an EOF PDU to be sent to the remote entity. Supply
-        // the checksum for the file copy progress sent so far.
-        let checksum = self.vfs.calculate_checksum(
-            self.put_request_cacher.source_file().unwrap(),
-            self.transaction_params
-                .remote_cfg
-                .as_ref()
-                .unwrap()
-                .default_crc_type,
-            self.transaction_params.file_params.progress,
-            self.pdu_and_cksum_buffer.borrow_mut().as_mut_slice(),
-        )?;
+        // the checksum for the file copy progress sent so far. A metadata-only transaction has
+        // no source file to read, so there is nothing to checksum.
+        let checksum = if self.transaction_params.file_params.metadata_only {
+            0
+        } else {
+            self.vfs.calculate_checksum(
+                self.put_request_cacher.source_file().unwrap(),
+                self.transaction_params
+                    .remote_cfg
+                    .as_ref()
+                    .unwrap()
+                    .default_crc_type,
+                self.transaction_params.file_params.progress,
+                self.pdu_and_cksum_buffer.borrow_mut().as_mut_slice(),
+            )?
+        };
         self.prepare_and_send_eof_pdu(user, checksum)?;
         *sent_packets += 1;
         if self.transmission_mode().unwrap() == TransmissionMode::Unacknowledged {
@@ -1289,6 +1296,7 @@ mod tests {
                 file_data::FileDataPdu, finished::FinishedPduCreator, metadata::MetadataPduReader,
                 nak::NakPduCreator,
             },
+            tlv::msg_to_user::MsgToUserTlv,
         },
         util::UnsignedByteFieldU16,
     };
@@ -1691,7 +1699,7 @@ mod tests {
                     .common_pdu_conf()
                     .transaction_seq_num
                     .value(),
-                0
+                cfdp_user.next_expected_seq_num
             );
             if self.transmission_mode == TransmissionMode::Unacknowledged {
                 if !closure_requested {
@@ -2409,6 +2417,83 @@ mod tests {
             DeliveryCode::Complete,
             ConditionCode::NoError,
             transfer_info.id,
+        );
+    }
+
+    /// Regression test for the CFDP Proxy Put Request use case (CCSDS 727.0-B-5 6.1): a
+    /// metadata-only transaction (no source file) still issues an EOF (No error) PDU per
+    /// 4.6.1.1.9 case (C), and that EOF carries a checksum of 0 rather than trying to checksum
+    /// a source file that does not exist.
+    #[test]
+    fn test_metadata_only_put_request_sends_eof_with_zero_checksum() {
+        let mut tb = SourceHandlerTestbench::new(TransmissionMode::Unacknowledged, false, 512);
+        let mut user = tb.create_user(0, 0);
+        let msg_to_user =
+            MsgToUserTlv::new(b"cfdp proxy put request placeholder").expect("creating tlv failed");
+        let put_request = PutRequestOwned::new_msgs_to_user_only(REMOTE_ID.into(), &[msg_to_user])
+            .expect("creating msgs to user only put request failed");
+        tb.put_request(&put_request)
+            .expect("put_request call failed");
+        assert_eq!(tb.handler.state(), State::Busy);
+        let sent_packets = tb
+            .handler
+            .state_machine_no_packet(&mut user)
+            .expect("source handler FSM failure");
+        assert_eq!(sent_packets, 2);
+        let metadata_pdu = tb.get_next_sent_pdu().unwrap();
+        assert_eq!(metadata_pdu.pdu_type, PduType::FileDirective);
+        assert_eq!(
+            metadata_pdu.file_directive_type,
+            Some(FileDirectiveType::Metadata)
+        );
+        let metadata_pdu_reader =
+            MetadataPduReader::new(&metadata_pdu.raw_pdu).expect("invalid metadata PDU format");
+        assert!(metadata_pdu_reader.src_file_name().is_empty());
+        assert!(metadata_pdu_reader.dest_file_name().is_empty());
+        assert_eq!(metadata_pdu_reader.metadata_params().file_size, 0);
+
+        let eof_pdu_sent = tb.get_next_sent_pdu().unwrap();
+        assert_eq!(eof_pdu_sent.pdu_type, PduType::FileDirective);
+        assert_eq!(
+            eof_pdu_sent.file_directive_type,
+            Some(FileDirectiveType::Eof)
+        );
+        let eof_pdu = EofPdu::from_bytes(&eof_pdu_sent.raw_pdu).expect("invalid EOF PDU format");
+        assert_eq!(eof_pdu.condition_code(), ConditionCode::NoError);
+        assert_eq!(eof_pdu.file_size(), 0);
+        assert_eq!(eof_pdu.file_checksum(), 0);
+        // No closure was requested on the put request, so it defaults to `true` and the
+        // transaction now waits for a Finished PDU instead of idling immediately.
+        assert_eq!(tb.handler.state(), State::Busy);
+        assert_eq!(tb.handler.step(), TransactionStep::WaitingForFinished);
+        tb.check_idle_on_drop = false;
+    }
+
+    /// Regression test for a bug where the source-side `TransactionParams::reset` only cleared
+    /// 2 of 11 fields, so a second transaction reused stale state left behind by the first and
+    /// computed its EOF checksum over the wrong data.
+    #[test]
+    fn test_second_transfer_after_first_completes_has_correct_checksum() {
+        let mut tb = SourceHandlerTestbench::new(TransmissionMode::Unacknowledged, false, 512);
+        let mut first_user = TestCfdpUser::default();
+        tb.common_tiny_file_transfer(&mut first_user, false);
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&tb.srcfile)
+            .expect("opening file failed");
+        let second_content = b"Goodbye World!!";
+        file.write_all(second_content)
+            .expect("writing file content failed");
+        drop(file);
+        let mut second_user = tb.create_user(1, second_content.len() as u64);
+        let (transfer_info, _fd_pdus) =
+            tb.generic_file_transfer(&mut second_user, false, second_content.to_vec());
+        second_user.verify_finished_indication(
+            DeliveryCode::Complete,
+            ConditionCode::NoError,
+            transfer_info.id,
+            FileStatus::Unreported,
         );
     }
 }

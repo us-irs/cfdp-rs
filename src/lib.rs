@@ -1263,6 +1263,7 @@ pub(crate) mod tests {
         pub expected_full_src_name: String,
         pub expected_full_dest_name: String,
         pub expected_file_size: u64,
+        pub expected_msgs_to_user_count: usize,
         pub transaction_indication_call_count: u32,
         pub eof_sent_call_count: u32,
         pub eof_recvd_call_count: u32,
@@ -1284,6 +1285,7 @@ pub(crate) mod tests {
                 expected_full_src_name,
                 expected_full_dest_name,
                 expected_file_size,
+                expected_msgs_to_user_count: 0,
                 transaction_indication_call_count: 0,
                 eof_recvd_call_count: 0,
                 eof_sent_call_count: 0,
@@ -1361,7 +1363,10 @@ pub(crate) mod tests {
                 String::from(md_recvd_params.dest_file_name),
                 self.expected_full_dest_name
             );
-            assert_eq!(md_recvd_params.msgs_to_user.len(), 0);
+            assert_eq!(
+                md_recvd_params.msgs_to_user.len(),
+                self.expected_msgs_to_user_count
+            );
             assert_eq!(md_recvd_params.source_id, LOCAL_ID.into());
             assert_eq!(md_recvd_params.file_size, self.expected_file_size);
             self.metadata_recv_queue.push_back(md_recvd_params.into());

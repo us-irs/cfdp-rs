@@ -172,7 +172,7 @@ struct TransactionParams<CountdownInstance: Countdown> {
     file_names: FileNames,
     msgs_to_user_size: usize,
     // TODO: Should we make this configurable?
-    msgs_to_user_buf: [u8; 1024],
+    msgs_to_user_buf: [u8; 2048],
     remote_cfg: Option<RemoteEntityConfig>,
     transaction_id: Option<TransactionId>,
     metadata_params: MetadataGenericParams,
@@ -226,7 +226,7 @@ impl<CheckTimer: Countdown> Default for TransactionParams<CheckTimer> {
             pdu_conf: Default::default(),
             msgs_to_user_size: 0,
             file_size: 0,
-            msgs_to_user_buf: [0; 1024],
+            msgs_to_user_buf: [0; 2048],
             file_names: Default::default(),
             remote_cfg: None,
             transaction_id: None,
@@ -305,6 +305,8 @@ pub enum DestError {
     InvalidRemoteConfig(RemoteEntityConfig),
     #[error("cfdp feature not implemented")]
     NotImplemented,
+    #[error("messages to user in metadata PDU exceed internal buffer size of {buf_len}")]
+    MsgsToUserBufferTooSmall { buf_len: usize },
 }
 
 /// This is the primary CFDP destination handler. It models the CFDP destination entity, which is
@@ -718,16 +720,21 @@ impl<
             self.transaction_params.file_names.dest_file_name[..dest_name.len_value()]
                 .copy_from_slice(dest_name.value());
             self.transaction_params.file_names.dest_file_name_len = dest_name.len_value();
-            self.transaction_params.msgs_to_user_size = 0;
         }
+        self.transaction_params.msgs_to_user_size = 0;
         if !metadata_pdu.options().is_empty() {
             for option_tlv in metadata_pdu.options_iter().unwrap() {
                 if option_tlv.is_standard_tlv()
                     && option_tlv.tlv_type().unwrap() == TlvType::MsgToUser
                 {
-                    self.transaction_params
-                        .msgs_to_user_buf
-                        .copy_from_slice(option_tlv.raw_data().unwrap());
+                    let raw = option_tlv.raw_data().unwrap();
+                    let start = self.transaction_params.msgs_to_user_size;
+                    let buf_len = self.transaction_params.msgs_to_user_buf.len();
+                    if start + raw.len() > buf_len {
+                        return Err(DestError::MsgsToUserBufferTooSmall { buf_len });
+                    }
+                    self.transaction_params.msgs_to_user_buf[start..start + raw.len()]
+                        .copy_from_slice(raw);
                     self.transaction_params.msgs_to_user_size += option_tlv.len_full();
                 }
             }
@@ -1641,6 +1648,16 @@ impl<
             msgs_to_user: &msgs_to_user[..num_msgs_to_user],
         };
         cfdp_user.metadata_recvd_indication(&metadata_recvd_params);
+        drop(msgs_to_user);
+
+        // A metadata-only transaction (e.g. a Proxy Put Request) has no destination file name
+        // at all, so there is nothing to create or truncate. Per CCSDS 727.0-B-5 4.6.1.1.9 the
+        // sender still issues an EOF PDU for it (case (C): no file is to be sent), so we still
+        // need to move on to receiving it rather than completing immediately.
+        if self.transaction_params.metadata_only {
+            self.set_step(TransactionStep::ReceivingFileDataPdus);
+            return Ok(());
+        }
 
         if self.vfs.exists(dest_name)? && self.vfs.is_dir(dest_name)? {
             // Create new destination path by concatenating the last part of the source source
@@ -1669,7 +1686,6 @@ impl<
             self.vfs.create_file(dest_path_str)?;
         }
         self.transaction_params.finished_params.file_status = FileStatus::Retained;
-        drop(msgs_to_user);
         self.set_step(TransactionStep::ReceivingFileDataPdus);
         Ok(())
     }
@@ -1916,6 +1932,7 @@ mod tests {
                 WritablePduPacket, finished::FinishedPduReader, metadata::MetadataPduCreator,
                 nak::NakPduReader,
             },
+            tlv::msg_to_user::MsgToUserTlv,
         },
         util::{UnsignedByteFieldU8, UnsignedEnum},
     };
@@ -2841,6 +2858,172 @@ mod tests {
         if let DestError::RecvdMetadataButIsBusy = error {
         } else {
             panic!("unexpected error: {:?}", error);
+        }
+    }
+
+    /// Regression test for a bug where messages to user exceeding the internal buffer caused a
+    /// slice index panic instead of a graceful error. A malicious or malformed metadata PDU with
+    /// enough Message To User TLVs must not be able to crash the destination handler.
+    #[test]
+    fn test_metadata_pdu_with_oversized_msgs_to_user_returns_error() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Unacknowledged,
+            false,
+        );
+        let mut user = tb.test_user_from_cached_paths(0);
+        // 9 TLVs with the maximum value length of 255 bytes each (9 * 257 = 2313 bytes) exceed
+        // the destination handler's 2048-byte messages-to-user buffer.
+        let msg_value = [0u8; 255];
+        let mut opts_buf = [0u8; 2313];
+        let mut opts_len = 0;
+        for _ in 0..9 {
+            let msg_to_user =
+                MsgToUserTlv::new(&msg_value).expect("creating msg to user tlv failed");
+            opts_len += msg_to_user
+                .write_to_bytes(&mut opts_buf[opts_len..])
+                .expect("writing msg to user tlv failed");
+        }
+        let pdu_header = PduHeader::new_for_file_directive(tb.pdu_conf, 0);
+        let metadata_pdu = MetadataPduCreator::new_with_opts(
+            pdu_header,
+            MetadataGenericParams::new(false, ChecksumType::NullChecksum, 0),
+            Lv::new_from_str(tb.src_path.to_str().unwrap()).unwrap(),
+            Lv::new_from_str(tb.dest_path.to_str().unwrap()).unwrap(),
+            &opts_buf[..opts_len],
+        );
+        let mut pdu_buf = [0u8; 4096];
+        let packet_info = create_packet_info(&metadata_pdu, &mut pdu_buf);
+        let result = tb.handler.state_machine(&mut user, Some(&packet_info));
+        assert!(matches!(
+            result,
+            Err(DestError::MsgsToUserBufferTooSmall { .. })
+        ));
+        tb.check_dest_file = false;
+        tb.check_handler_idle_at_drop = false;
+    }
+
+    /// Regression test for a bug where `msgs_to_user_buf.copy_from_slice(..)` copied a message
+    /// TLV into the full 1024-byte buffer instead of a correctly-sized offset slice, panicking
+    /// on any metadata PDU carrying a Message To User TLV.
+    #[test]
+    fn test_metadata_pdu_with_msgs_to_user_tlv_does_not_panic() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Unacknowledged,
+            false,
+        );
+        let mut user = tb.test_user_from_cached_paths(0);
+        user.expected_msgs_to_user_count = 1;
+        let msg_value = *b"hello proxy message";
+        let msg_to_user = MsgToUserTlv::new(&msg_value).expect("creating msg to user tlv failed");
+        let mut opts_buf = [0u8; 64];
+        let opts_len = msg_to_user
+            .write_to_bytes(&mut opts_buf)
+            .expect("writing msg to user tlv failed");
+        let pdu_header = PduHeader::new_for_file_directive(tb.pdu_conf, 0);
+        let metadata_pdu = MetadataPduCreator::new_with_opts(
+            pdu_header,
+            MetadataGenericParams::new(false, ChecksumType::NullChecksum, 0),
+            Lv::new_from_str(tb.src_path.to_str().unwrap()).unwrap(),
+            Lv::new_from_str(tb.dest_path.to_str().unwrap()).unwrap(),
+            &opts_buf[..opts_len],
+        );
+        let packet_info = create_packet_info(&metadata_pdu, &mut tb.buf);
+        tb.handler
+            .state_machine(&mut user, Some(&packet_info))
+            .expect("state machine failure");
+        assert_eq!(user.metadata_recv_queue.len(), 1);
+        let metadata_recvd = user.metadata_recv_queue.pop_front().unwrap();
+        assert_eq!(metadata_recvd.msgs_to_user.len(), 1);
+        assert_eq!(metadata_recvd.msgs_to_user[0], opts_buf[..opts_len]);
+        tb.check_dest_file = false;
+        tb.check_handler_idle_at_drop = false;
+    }
+
+    /// Regression test for the CFDP Proxy Put Request use case (CCSDS 727.0-B-5 6.1): a
+    /// metadata-only transaction (no source/destination file names, only a message to user).
+    /// Two bugs made this fail: the destination handler unconditionally tried to create/
+    /// truncate a destination file even though there is no destination file name, and per
+    /// 4.6.1.1.9 case (C) the sender still issues an EOF (No error) PDU ("no file is to be
+    /// sent") which the destination must still process rather than short-circuit to completion
+    /// right after the Metadata PDU.
+    #[test]
+    fn test_metadata_only_transaction_completes_without_touching_filestore() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Unacknowledged,
+            false,
+        );
+        let mut user = tb.test_user_from_cached_paths(0);
+        user.expected_msgs_to_user_count = 1;
+        user.expected_full_src_name = String::new();
+        user.expected_full_dest_name = String::new();
+        let msg_value = *b"cfdp proxy put request placeholder";
+        let msg_to_user = MsgToUserTlv::new(&msg_value).expect("creating msg to user tlv failed");
+        let mut opts_buf = [0u8; 64];
+        let opts_len = msg_to_user
+            .write_to_bytes(&mut opts_buf)
+            .expect("writing msg to user tlv failed");
+        let pdu_header = PduHeader::new_for_file_directive(tb.pdu_conf, 0);
+        let metadata_pdu = MetadataPduCreator::new_with_opts(
+            pdu_header,
+            MetadataGenericParams::new(false, ChecksumType::NullChecksum, 0),
+            Lv::new_empty(),
+            Lv::new_empty(),
+            &opts_buf[..opts_len],
+        );
+        let packet_info = create_packet_info(&metadata_pdu, &mut tb.buf);
+        tb.handler
+            .state_machine(&mut user, Some(&packet_info))
+            .expect("state machine failure processing metadata-only PDU");
+        assert_eq!(user.metadata_recv_queue.len(), 1);
+        let metadata_recvd = user.metadata_recv_queue.pop_front().unwrap();
+        assert!(metadata_recvd.src_file_name.is_empty());
+        assert!(metadata_recvd.dest_file_name.is_empty());
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+
+        tb.generic_eof_no_error(&mut user, Vec::new())
+            .expect("EOF no error insertion failed for metadata-only transaction");
+        tb.check_dest_file = false;
+        assert_eq!(user.finished_indic_queue.len(), 1);
+        let finished_indication = user.finished_indic_queue.pop_front().unwrap();
+        assert_eq!(finished_indication.file_status, FileStatus::Unreported);
+        assert_eq!(finished_indication.delivery_code, DeliveryCode::Complete);
+        assert_eq!(finished_indication.condition_code, ConditionCode::NoError);
+    }
+
+    /// Regression test for a bug where `TransactionParams::reset` only cleared 2 of ~18 fields
+    /// (e.g. leftover `acked_params`), so a transaction reusing the same handler right after a
+    /// previous one completed had its Metadata PDU silently treated as a duplicate and dropped.
+    #[test]
+    fn test_second_transaction_after_first_completes_is_not_dropped() {
+        let file_data_str = "Hello World!";
+        let file_data = file_data_str.as_bytes();
+        let file_size = file_data.len() as u64;
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Acknowledged,
+            false,
+        );
+        for _ in 0..2 {
+            let mut user = tb.test_user_from_cached_paths(file_size);
+            let transfer_info = tb
+                .generic_transfer_init(&mut user, file_size)
+                .expect("transfer init failed");
+            tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+            tb.generic_file_data_insert(&mut user, 0, file_data)
+                .expect("file data insertion failed");
+            tb.generic_eof_no_error(&mut user, file_data.to_vec())
+                .expect("EOF no error insertion failed");
+            tb.check_completion_indication_success(&mut user);
+            tb.check_eof_ack_pdu(ConditionCode::NoError);
+            tb.check_finished_pdu_success();
+            tb.acknowledge_finished_pdu(&mut user, &transfer_info);
         }
     }
 
