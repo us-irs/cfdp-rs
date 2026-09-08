@@ -18,9 +18,8 @@ name = "cfdp"
 [dependencies]
 crc = "3"
 smallvec = "1"
-derive-new = ">=0.6, <=0.7"
-hashbrown = { version = ">=0.14, <=0.15", optional = true }
-spacepackets = { version = "0.17", default-features = false }
+hashbrown = { version = "0.17", optional = true }
+spacepackets = { version = "0.18", default-features = false }
 thiserror = { version = "2", default-features = false }
 heapless = "0.9"
 serde = { version = "1", optional = true }
@@ -54,7 +53,7 @@ packet-buf-4k = []
 
 [dev-dependencies]
 tempfile = "3"
-rand = "0.9"
+rand = "0.10"
 log = "0.4"
 fern = "0.7"
 chrono = "0.4"

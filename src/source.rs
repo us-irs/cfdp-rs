@@ -502,24 +502,16 @@ impl<
         }
         let remote_cfg = remote_cfg.unwrap();
         self.state_helper.num_packets_ready.set(0);
-        let transmission_mode = if self.put_request_cacher.static_fields.trans_mode.is_some() {
-            self.put_request_cacher.static_fields.trans_mode.unwrap()
-        } else {
-            remote_cfg.default_transmission_mode
-        };
-        let closure_requested = if self
+        let transmission_mode = self
+            .put_request_cacher
+            .static_fields
+            .trans_mode
+            .unwrap_or(remote_cfg.default_transmission_mode);
+        let closure_requested = self
             .put_request_cacher
             .static_fields
             .closure_requested
-            .is_some()
-        {
-            self.put_request_cacher
-                .static_fields
-                .closure_requested
-                .unwrap()
-        } else {
-            remote_cfg.closure_requested_by_default
-        };
+            .unwrap_or(remote_cfg.closure_requested_by_default);
         if self.put_request_cacher.has_source_file()
             && !self.vfs.exists(self.put_request_cacher.source_file()?)?
         {
@@ -529,7 +521,7 @@ impl<
         let transaction_id = TransactionId::new(
             self.local_cfg().id,
             UnsignedByteField::new(
-                SequenceCounterInstance::MAX_BIT_WIDTH / 8,
+                self.seq_count_provider.max_bit_width() / 8,
                 self.seq_count_provider.get_and_increment().into(),
             ),
         );
@@ -1037,11 +1029,8 @@ impl<
             remote_cfg.max_packet_len,
             None,
         );
-        if remote_cfg.max_file_segment_len.is_some() {
-            derived_max_seg_len = core::cmp::min(
-                remote_cfg.max_file_segment_len.unwrap(),
-                derived_max_seg_len,
-            );
+        if let Some(max_file_segment_len) = remote_cfg.max_file_segment_len {
+            derived_max_seg_len = core::cmp::min(max_file_segment_len, derived_max_seg_len);
         }
         derived_max_seg_len as u64
     }
@@ -1292,7 +1281,7 @@ mod tests {
     use std::{fs::OpenOptions, io::Write, path::PathBuf, vec::Vec};
 
     use alloc::string::String;
-    use rand::Rng;
+    use rand::RngExt as _;
     use spacepackets::{
         cfdp::{
             ChecksumType, CrcFlag,
@@ -1325,7 +1314,7 @@ mod tests {
     fn init_full_filepaths_textfile() -> (TempPath, PathBuf) {
         (
             tempfile::NamedTempFile::new().unwrap().into_temp_path(),
-            tempfile::TempPath::from_path("/tmp/test.txt").to_path_buf(),
+            PathBuf::from("/tmp/test.txt"),
         )
     }
 
