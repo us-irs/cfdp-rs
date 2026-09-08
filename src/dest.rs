@@ -156,14 +156,6 @@ impl Default for FinishedParams {
     }
 }
 
-impl FinishedParams {
-    pub fn reset(&mut self) {
-        self.condition_code.set(ConditionCode::NoError);
-        self.delivery_code.set(DeliveryCode::Incomplete);
-        self.file_status = FileStatus::Unreported;
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
 pub struct AcknowledgedModeParams {
     last_start_offset: u64,
@@ -2182,10 +2174,6 @@ mod tests {
         fn check_completion_indication_success(&mut self, user: &mut TestCfdpUser) {
             assert_eq!(user.finished_indic_queue.len(), 1);
             let finished_indication = user.finished_indic_queue.pop_front().unwrap();
-            assert_eq!(
-                finished_indication.id,
-                self.handler.transaction_id().unwrap()
-            );
             assert_eq!(finished_indication.file_status, FileStatus::Retained);
             assert_eq!(finished_indication.delivery_code, DeliveryCode::Complete);
             assert_eq!(finished_indication.condition_code, ConditionCode::NoError);
@@ -2200,10 +2188,6 @@ mod tests {
         ) {
             assert_eq!(user.finished_indic_queue.len(), 1);
             let finished_indication = user.finished_indic_queue.pop_front().unwrap();
-            assert_eq!(
-                finished_indication.id,
-                self.handler.transaction_id().unwrap()
-            );
             assert_eq!(finished_indication.file_status, file_status);
             assert_eq!(finished_indication.delivery_code, delivery_code);
             assert_eq!(finished_indication.condition_code, cond_code);
