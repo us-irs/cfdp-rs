@@ -876,9 +876,9 @@ impl<
         );
         if let Err(e) = self.vfs.write_data(
             // Safety: It was already verified that the path is valid during the transaction start.
+            #[allow(unsafe_code)]
             unsafe {
                 from_utf8_unchecked(
-                    //from_utf8(
                     &self.transaction_params.file_names.dest_path_buf
                         [0..self.transaction_params.file_names.dest_file_path_len],
                 )
@@ -1469,6 +1469,7 @@ impl<
         match self.vfs.checksum_verify(
             checksum,
             // Safety: It was already verified that the path is valid during the transaction start.
+            #[allow(unsafe_code)]
             unsafe {
                 from_utf8_unchecked(
                     &self.transaction_params.file_names.dest_path_buf
@@ -1788,6 +1789,7 @@ impl<
                 == DeliveryCode::Incomplete
         {
             // Safety: We already verified that the path is valid during the transaction start.
+            #[allow(unsafe_code)]
             let dest_path = unsafe {
                 from_utf8_unchecked(
                     &self.transaction_params.file_names.dest_path_buf
@@ -1914,7 +1916,7 @@ mod tests {
     };
 
     use alloc::vec::Vec;
-    use rand::Rng;
+    use rand::RngExt as _;
     use spacepackets::{
         cfdp::{
             ChecksumType, TransmissionMode,
@@ -2305,7 +2307,7 @@ mod tests {
 
     fn init_full_filepaths_textfile() -> (PathBuf, PathBuf) {
         (
-            tempfile::TempPath::from_path("/tmp/test.txt").to_path_buf(),
+            PathBuf::from("/tmp/test.txt"),
             tempfile::NamedTempFile::new()
                 .unwrap()
                 .into_temp_path()
@@ -2976,7 +2978,7 @@ mod tests {
     #[test]
     fn test_file_copy_to_directory() {
         let fault_handler = TestFaultHandler::default();
-        let src_path = tempfile::TempPath::from_path("/tmp/test.txt").to_path_buf();
+        let src_path = PathBuf::from("/tmp/test.txt");
         let dest_path = tempfile::TempDir::new().unwrap();
         let mut dest_path_buf = dest_path.keep();
         let mut tb = DestHandlerTestbench::new(
