@@ -558,6 +558,10 @@ impl<
         self.set_step(TransactionStep::Idle);
         self.state = State::Idle;
         self.transaction_params.reset();
+        // lost_segment_tracker lives outside TransactionParams, so it is not covered by the
+        // reset above. A transaction cancelled or abandoned while a gap was still open would
+        // otherwise leave it behind for the next transaction on this handler instance.
+        self.lost_segment_tracker.reset();
     }
 
     fn insert_packet(
@@ -3998,6 +4002,69 @@ mod tests {
         }
         tb.acknowledge_finished_pdu(&mut user, &transfer_info);
         tb.check_dest_file = false;
+    }
+
+    /// Regression test for `lost_segment_tracker` living outside `TransactionParams` and so not
+    /// being cleared by `reset()`. A transaction cancelled while a gap is still open (as above)
+    /// used to leave that gap in the tracker, where it would be inherited by the next
+    /// transaction on the same handler instance.
+    #[test]
+    fn test_lost_segment_tracker_is_cleared_on_reset_after_cancellation() {
+        let file_data_str = "Hello World!";
+        let file_data = file_data_str.as_bytes();
+        let file_size = file_data.len() as u64;
+        let fault_handler = TestFaultHandler::default();
+
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Acknowledged,
+            false,
+        );
+        tb.remote_cfg_mut().immediate_nak_mode = false;
+        tb.check_dest_file = false;
+        let mut user = tb.test_user_from_cached_paths(file_size);
+        let transfer_info = tb
+            .generic_transfer_init(&mut user, file_size)
+            .expect("transfer init failed");
+        // Only the second half of the file arrives, so (0, 4) stays an open gap.
+        tb.generic_file_data_insert(&mut user, 4, &file_data[4..])
+            .expect("file data insertion failed");
+        tb.generic_eof_no_error(&mut user, file_data.to_vec())
+            .expect("EOF no error insertion failed");
+        tb.check_dest_file = false;
+        assert!(!tb.handler.lost_segment_tracker.is_empty());
+        tb.check_eof_ack_pdu(ConditionCode::NoError);
+        tb.get_next_pdu(); // the NAK for (0, 4)
+
+        // Exhaust the NAK limit so the transaction is cancelled with the gap still open.
+        tb.set_nak_activity_timer_expired();
+        tb.handler
+            .state_machine_no_packet(&mut user)
+            .expect("nak activity timer expiration handling failed");
+        tb.get_next_pdu(); // the re-sent NAK
+        tb.set_nak_activity_timer_expired();
+        tb.handler
+            .state_machine_no_packet(&mut user)
+            .expect("nak activity timer expiration handling failed");
+        tb.check_completion_indication_failure(
+            &mut user,
+            ConditionCode::NakLimitReached,
+            FileStatus::Retained,
+            DeliveryCode::Incomplete,
+        );
+        tb.check_finished_pdu_failure(
+            ConditionCode::NakLimitReached,
+            FileStatus::Retained,
+            DeliveryCode::Incomplete,
+        );
+        tb.fault_handler()
+            .user_hook
+            .borrow_mut()
+            .notice_of_cancellation_queue
+            .clear();
+        tb.acknowledge_finished_pdu(&mut user, &transfer_info);
+
+        assert!(tb.handler.lost_segment_tracker.is_empty());
     }
 
     #[test]
