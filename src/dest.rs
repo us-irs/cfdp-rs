@@ -994,6 +994,15 @@ impl<
         let first_packet = self.step() == TransactionStep::Idle;
         if first_packet {
             self.first_packet_handling(eof_pdu.pdu_header().common_pdu_conf())?;
+        } else if self.is_duplicate_eof_pdu() {
+            // CFDP 4.7.2: every EOF PDU must be acknowledged. Reaching this point means our
+            // previous ACK did not arrive, because the sender only retransmits the EOF on its
+            // own positive ACK timer. Answering it again is the only thing that breaks the
+            // deadlock: otherwise the sender retransmits to its limit and declares a fault at
+            // the end of an otherwise successful transfer. Nothing else about the transaction
+            // is touched, the EOF was already fully processed when the first copy arrived.
+            self.acknowledge_eof_pdu(&eof_pdu)?;
+            return Ok(1);
         }
         if self.local_cfg.indication_cfg.eof_recv {
             // Unwrap is okay here, application logic ensures that transaction ID is valid here.
@@ -1041,6 +1050,25 @@ impl<
             }
         }
         Ok(sent_packets)
+    }
+
+    /// Whether this is an EOF PDU for a step which already consumed one.
+    ///
+    /// `deferred_procedure_active` is only ever set by an EOF handler, so it being active
+    /// already means an EOF was processed before. The other reachable case is waiting for the
+    /// ACK of our own Finished PDU, sent once the transfer (and the deferred procedure, if any)
+    /// completed.
+    fn is_duplicate_eof_pdu(&self) -> bool {
+        if self.transaction_params.transmission_mode() != TransmissionMode::Acknowledged {
+            return false;
+        }
+        if self.step() == TransactionStep::WaitingForFinishedAck {
+            return true;
+        }
+        self.transaction_params
+            .acked_params
+            .as_ref()
+            .is_some_and(|params| params.deferred_procedure_active)
     }
 
     fn handle_eof_without_previous_metadata_in_acked_mode(
@@ -3061,12 +3089,7 @@ mod tests {
             .lost_segment_tracker
             .add_lost_segment((8, 12))
             .expect("adding lost segment failed");
-        let acked_params = tb
-            .handler
-            .transaction_params
-            .acked_params
-            .as_mut()
-            .unwrap();
+        let acked_params = tb.handler.transaction_params.acked_params.as_mut().unwrap();
         acked_params.last_start_offset = 8;
         acked_params.last_end_offset = 12;
 
@@ -3077,6 +3100,98 @@ mod tests {
             .lost_segment_handling(&fd_pdu)
             .expect("lost segment handling failed");
         assert!(tb.handler.lost_segment_tracker.is_empty());
+    }
+
+    /// CFDP 4.7.2: every EOF PDU must be acknowledged. If our ACK is lost, the sender
+    /// retransmits the EOF until its positive ACK limit, so a destination which has already
+    /// moved on to waiting for the Finished ACK still has to answer it.
+    #[test]
+    fn test_duplicate_eof_is_acknowledged_while_waiting_for_finished_ack() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Acknowledged,
+            false,
+        );
+        let mut user = tb.test_user_from_cached_paths(0);
+        let transfer_info = tb
+            .generic_transfer_init(&mut user, 0)
+            .expect("transfer init failed");
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_eof_no_error(&mut user, Vec::new())
+            .expect("EOF no error insertion failed");
+        tb.check_completion_indication_success(&mut user);
+        assert_eq!(tb.pdu_queue_len(), 2);
+        tb.check_eof_ack_pdu(ConditionCode::NoError);
+        tb.check_finished_pdu_success();
+        tb.state_check(State::Busy, TransactionStep::WaitingForFinishedAck);
+
+        // The sender never saw our ACK and retransmits the EOF PDU.
+        let pdu_header = PduHeader::new_for_file_directive(tb.pdu_conf, 0);
+        let eof_pdu = create_no_error_eof(&[], &pdu_header);
+        let packet_info = create_packet_info(&eof_pdu, &mut tb.buf);
+        let sent_packets = tb
+            .handler
+            .state_machine(&mut user, Some(&packet_info))
+            .expect("duplicate EOF insertion failed");
+        assert_eq!(sent_packets, 1);
+        tb.state_check(State::Busy, TransactionStep::WaitingForFinishedAck);
+        tb.check_eof_ack_pdu(ConditionCode::NoError);
+        // The duplicate must not re-run the completion procedures.
+        assert_eq!(user.finished_indic_queue.len(), 0);
+        assert_eq!(user.eof_recvd_call_count, 1);
+
+        tb.acknowledge_finished_pdu(&mut user, &transfer_info);
+    }
+
+    /// Same scenario as above, but the duplicate arrives while the deferred lost segment
+    /// procedure for a still-missing file segment is running.
+    #[test]
+    fn test_duplicate_eof_is_acknowledged_while_deferred_procedure_active() {
+        let file_data_str = "Hello World!";
+        let file_data = file_data_str.as_bytes();
+        let file_size = file_data.len() as u64;
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Acknowledged,
+            false,
+        );
+        tb.remote_cfg_mut().immediate_nak_mode = false;
+        let mut user = tb.test_user_from_cached_paths(file_size);
+        let transfer_info = tb
+            .generic_transfer_init(&mut user, file_size)
+            .expect("transfer init failed");
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+        tb.generic_file_data_insert(&mut user, 0, &file_data[0..5])
+            .expect("file data insertion failed");
+        tb.generic_eof_no_error(&mut user, file_data.to_vec())
+            .expect("EOF no error insertion failed");
+        tb.check_eof_ack_pdu(ConditionCode::NoError);
+        // The NAK for the still-missing segment (5..12).
+        tb.get_next_pdu();
+        assert!(tb.pdu_queue_empty());
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+
+        // The sender never saw our ACK and retransmits the EOF PDU while the deferred
+        // procedure for the remaining gap is still running.
+        let pdu_header = PduHeader::new_for_file_directive(tb.pdu_conf, 0);
+        let eof_pdu = create_no_error_eof(file_data, &pdu_header);
+        let packet_info = create_packet_info(&eof_pdu, &mut tb.buf);
+        let sent_packets = tb
+            .handler
+            .state_machine(&mut user, Some(&packet_info))
+            .expect("duplicate EOF insertion failed");
+        assert_eq!(sent_packets, 1);
+        tb.check_eof_ack_pdu(ConditionCode::NoError);
+        tb.state_check(State::Busy, TransactionStep::ReceivingFileDataPdus);
+
+        // The remaining segment still completes the transfer normally.
+        tb.generic_file_data_insert(&mut user, 5, &file_data[5..])
+            .expect("file data insertion failed");
+        tb.check_completion_indication_success(&mut user);
+        tb.check_finished_pdu_success();
+        tb.acknowledge_finished_pdu(&mut user, &transfer_info);
     }
 
     #[test]
