@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Destination handler no longer panics when a metadata PDU's Message To User TLVs overflow its
   internal buffer. It now returns `DestError::MsgsToUserBufferTooSmall` instead, and the buffer
   was bumped from 1024 to 2048 bytes.
+- Destination handler's `lost_segment_handling` now clears a gap that a retransmission exactly
+  refills. It used to compare the end of the received segment against the start of the most
+  recently received window instead of its end, so such a retransmission matched neither branch
+  and the gap stayed in the tracker, causing the destination to re-request data it had already
+  written on every NAK round until it hit its NAK limit.
 
 # [v0.3.0] 2025-09-25
 

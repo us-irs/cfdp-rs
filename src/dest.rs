@@ -910,8 +910,12 @@ impl<
 
         let mut sent_packets = 0;
         let acked_params = self.transaction_params.acked_params.as_mut().unwrap();
-        if fd_pdu.offset() > acked_params.last_end_offset {
-            let lost_segment = (acked_params.last_end_offset, fd_pdu.offset());
+        // Capture last_end_offset before it's updated below. The branches that follow need
+        // the old value, not the new one, to tell whether this PDU extends the received range
+        // or just fills a gap inside it.
+        let previous_end_offset = acked_params.last_end_offset;
+        if fd_pdu.offset() > previous_end_offset {
+            let lost_segment = (previous_end_offset, fd_pdu.offset());
             self.lost_segment_tracker.add_lost_segment(lost_segment)?;
             if self
                 .transaction_params
@@ -956,12 +960,18 @@ impl<
                 sent_packets += 1;
             }
         }
-        if fd_pdu.offset() >= acked_params.last_end_offset {
+        if fd_pdu.offset() >= previous_end_offset {
             acked_params.last_start_offset = fd_pdu.offset();
             acked_params.last_end_offset = fd_pdu.offset() + fd_pdu.file_data().len() as u64;
-        }
-        if fd_pdu.offset() + fd_pdu.file_data().len() as u64 <= acked_params.last_start_offset {
-            // Might be a re-requested FD PDU.
+        } else if fd_pdu.offset() + fd_pdu.file_data().len() as u64 <= previous_end_offset {
+            // The segment lies inside what was already received, so it can only be filling a
+            // gap: a re-requested FD PDU, or one which arrived out of order. This used to be
+            // compared against last_start_offset, the start of the most recently received
+            // segment, rather than the end of the received region. A retransmission which
+            // exactly refilled that most recent window therefore matched neither branch and
+            // the gap stayed in the tracker, so the destination re-requested the same segment
+            // on every NAK round until it reached its NAK limit, even though the data had
+            // already arrived and been written.
             let removed = self.lost_segment_tracker.remove_lost_segment((
                 fd_pdu.offset(),
                 fd_pdu.offset() + fd_pdu.file_data().len() as u64,
@@ -3025,6 +3035,48 @@ mod tests {
             tb.check_finished_pdu_success();
             tb.acknowledge_finished_pdu(&mut user, &transfer_info);
         }
+    }
+
+    /// White box regression test. On a lossy link a span can end up being both the most
+    /// recently received window and a tracked gap. The removal used to be decided by
+    /// comparing the end of the received segment against the START of that window, which
+    /// such a retransmission never satisfies, so the gap stayed in the tracker: the
+    /// destination re-requested data it had already written on every NAK round until it hit
+    /// its NAK limit, with the transfer stuck at full progress.
+    #[test]
+    fn test_lost_segment_handling_clears_gap_matching_last_received_window() {
+        let fault_handler = TestFaultHandler::default();
+        let mut tb = DestHandlerTestbench::new_with_fixed_paths(
+            fault_handler,
+            TransmissionMode::Acknowledged,
+            false,
+        );
+        tb.check_dest_file = false;
+        tb.check_handler_idle_at_drop = false;
+        let mut user = tb.test_user_from_cached_paths(12);
+        tb.generic_transfer_init(&mut user, 12)
+            .expect("transfer init failed");
+
+        tb.handler
+            .lost_segment_tracker
+            .add_lost_segment((8, 12))
+            .expect("adding lost segment failed");
+        let acked_params = tb
+            .handler
+            .transaction_params
+            .acked_params
+            .as_mut()
+            .unwrap();
+        acked_params.last_start_offset = 8;
+        acked_params.last_end_offset = 12;
+
+        let pdu_header = PduHeader::new_for_file_data_default(tb.pdu_conf, 0);
+        let file_data = [0_u8; 4];
+        let fd_pdu = FileDataPdu::new_no_seg_metadata(pdu_header, 8, &file_data);
+        tb.handler
+            .lost_segment_handling(&fd_pdu)
+            .expect("lost segment handling failed");
+        assert!(tb.handler.lost_segment_tracker.is_empty());
     }
 
     #[test]
