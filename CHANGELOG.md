@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   recently received window instead of its end, so such a retransmission matched neither branch
   and the gap stayed in the tracker, causing the destination to re-request data it had already
   written on every NAK round until it hit its NAK limit.
+- Destination handler now answers a retransmitted EOF PDU instead of silently reprocessing it.
+  Per CFDP 4.7.2 every EOF PDU must be acknowledged, and a retransmission means our previous ACK
+  was lost. It used to be handled like a brand new EOF regardless of transaction state, which
+  re-ran completion, re-sent a fresh Finished PDU, and restarted its positive ACK procedure on
+  every retransmission the sender made.
 
 # [v0.3.0] 2025-09-25
 
