@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   was lost. It used to be handled like a brand new EOF regardless of transaction state, which
   re-ran completion, re-sent a fresh Finished PDU, and restarted its positive ACK procedure on
   every retransmission the sender made.
+- Destination handler's `reset` now also clears `lost_segment_tracker`. That field lives outside
+  `TransactionParams`, so a transaction cancelled or abandoned while a gap was still open left it
+  behind for the next transaction on the same handler instance.
 
 # [v0.3.0] 2025-09-25
 
